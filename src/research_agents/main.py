@@ -22,16 +22,18 @@ async def chat_loop(
     print("=" * 40)
     print(f"Session ID: {main_agent.session_id}")
     print("Commands:")
-    print("  research <query> - Search, validate, and generate report")
-    print("  quit/exit  - End the session")
-    print("  clear      - Clear conversation history")
-    print("  cache      - Show cached research count")
-    print("  clearcache - Clear research cache")
-    print("  status     - Show validation status")
-    print("  agents     - List available agents")
-    print("  history    - Show execution history")
-    print("  dbstats    - Show database statistics")
-    print("  dbreports  - List reports from database")
+    print("  research <query> - Search, validate, and generate report (resets context)")
+    print("  dig <query>      - Follow-up research within current context")
+    print("  context          - Show current research context")
+    print("  quit/exit        - End the session")
+    print("  clear            - Clear conversation history")
+    print("  cache            - Show cached research count")
+    print("  clearcache       - Clear research cache and context")
+    print("  status           - Show validation status")
+    print("  agents           - List available agents")
+    print("  history          - Show execution history")
+    print("  dbstats          - Show database statistics")
+    print("  dbreports        - List reports from database")
     print()
 
     try:
@@ -121,9 +123,38 @@ async def chat_loop(
                 print()
                 continue
 
+            if user_input.lower() == "context":
+                ctx = main_agent.research_context
+                if ctx.is_active():
+                    print("Current Research Context:")
+                    print(f"  Topic: {ctx.topic}")
+                    print(f"  Original query: {ctx.original_query}")
+                    print(f"  Started: {ctx.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"  Queries made: {len(ctx.queries_made)}")
+                    if ctx.queries_made:
+                        for i, q in enumerate(ctx.queries_made, 1):
+                            print(f"    {i}. {q}")
+                    print(f"  Sources explored: {len(ctx.sources_explored)}")
+                    print(f"  Raw findings: {len(ctx.raw_findings)}")
+                    print(f"  Validated findings: {len(ctx.validated_findings)}")
+                    print(f"  Removed findings: {len(ctx.removed_findings)}")
+                    if ctx.key_facts:
+                        print(f"  Key facts ({len(ctx.key_facts)}):")
+                        for fact in ctx.key_facts[:3]:
+                            print(f"    - {fact[:80]}...")
+                else:
+                    print("No active research context. Use 'research <query>' to start.")
+                print()
+                continue
+
             if user_input.lower() == "research" or user_input.lower().startswith("research "):
                 query = user_input[8:].strip() if len(user_input) > 8 else ""
                 if query:
+                    # Reset context for new research
+                    main_agent.research_context.reset(new_topic=query, new_query=query)
+                    main_agent.clear_research_cache()
+                    print(f"Starting new research context: {query}")
+
                     settings = get_settings()
                     max_repeats = settings.max_repeats
                     all_validated = []
@@ -148,6 +179,9 @@ async def chat_loop(
                         main_agent.current_query = query
                         print(f"Found {len(findings)} results.")
 
+                        # Track findings in context
+                        main_agent.research_context.add_findings(findings)
+
                         if not findings:
                             if attempt <= max_repeats:
                                 print("No results found. Retrying...")
@@ -162,6 +196,9 @@ async def chat_loop(
                         validated = validation_result.get("validated", [])
                         removed = validation_result.get("removed", [])
                         stats = validation_result.get("stats", {})
+
+                        # Track validation in context
+                        main_agent.research_context.add_validated(validated, removed)
 
                         print(f"Validation: {len(validated)} verified, {len(removed)} removed ({stats.get('validation_rate', 0):.0%} rate)")
 
@@ -220,6 +257,97 @@ async def chat_loop(
                         print("=" * 50)
                 else:
                     print("Please provide a search query. Usage: research <query>")
+                print()
+                continue
+
+            # Dig command for follow-up research within context
+            if user_input.lower() == "dig" or user_input.lower().startswith("dig "):
+                follow_up_query = user_input[3:].strip() if len(user_input) > 3 else ""
+                if not follow_up_query:
+                    print("Please provide a follow-up query. Usage: dig <query>")
+                    print()
+                    continue
+
+                if not main_agent.research_context.is_active():
+                    print("No active research context. Use 'research <query>' first to establish context.")
+                    print()
+                    continue
+
+                # Record follow-up query
+                main_agent.research_context.add_follow_up(follow_up_query)
+
+                # Get context for agents
+                ctx = main_agent.research_context.get_context_for_agent()
+                print(f"Follow-up research in context of: {ctx['topic']}")
+                print(f"  Previous queries: {len(ctx['previous_queries'])}")
+                print(f"  Sources already explored: {len(ctx['sources_already_explored'])}")
+
+                # Research with context
+                print(f"Researching: {follow_up_query}...")
+                research_context = {
+                    "depth": "normal",
+                    "research_context": ctx,
+                    "exclude_urls": ctx["sources_already_explored"],
+                }
+                result = await research_agent.execute(follow_up_query, research_context)
+
+                if result.get("status") != "completed":
+                    print(f"Research failed: {result.get('error', 'Unknown error')}")
+                    print()
+                    continue
+
+                findings = result.get("findings", [])
+                print(f"Found {len(findings)} new results.")
+
+                # Track findings in context
+                main_agent.research_context.add_findings(findings)
+
+                if not findings:
+                    print("No new results found.")
+                    print()
+                    continue
+
+                # Validate with context
+                print(f"Validating {len(findings)} findings...")
+                validation_context = {
+                    "research_context": ctx,
+                    "min_confidence": 0.4,
+                }
+                validation_result = await validation_agent.validate_findings(findings, **validation_context)
+                validated = validation_result.get("validated", [])
+                removed = validation_result.get("removed", [])
+                stats = validation_result.get("stats", {})
+
+                # Track validation in context
+                main_agent.research_context.add_validated(validated, removed)
+
+                print(f"Validation: {len(validated)} verified, {len(removed)} removed ({stats.get('validation_rate', 0):.0%} rate)")
+
+                if validated:
+                    # Add to main agent state
+                    main_agent.validated_findings.extend(validated)
+                    main_agent.research_cache.append({
+                        "source": f"Follow-up: {follow_up_query}",
+                        "content": "\n".join(
+                            f"- {f.get('title', 'Untitled')}: {f.get('snippet', '')}"
+                            for f in validated
+                        ),
+                    })
+
+                    # Show results
+                    print("\nNew validated findings:")
+                    for f in validated[:5]:
+                        conf = f.get("validation", {}).get("confidence", 0)
+                        print(f"  [{conf:.0%}] {f.get('title', 'Untitled')[:60]}")
+                    if len(validated) > 5:
+                        print(f"  ... and {len(validated) - 5} more")
+
+                    # Update context summary
+                    ctx_summary = main_agent.research_context
+                    print(f"\nContext totals: {len(ctx_summary.validated_findings)} validated, {len(ctx_summary.sources_explored)} sources")
+                else:
+                    print("No findings could be verified.")
+
                 print()
                 continue
 

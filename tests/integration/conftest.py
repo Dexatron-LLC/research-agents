@@ -141,7 +141,7 @@ async def full_agent_system(
     research_agent.search_tool = mock_search_tool
 
     # Mock the research agent's LLM-dependent methods for integration tests
-    async def mock_generate_queries(topic: str):
+    async def mock_generate_queries(topic: str, research_context: dict | None = None):
         return [topic]  # Just return the original topic
 
     async def mock_analyze_content(url: str, title: str, content: str, topic: str):

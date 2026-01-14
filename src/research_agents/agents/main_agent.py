@@ -2,6 +2,8 @@
 
 import json
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -10,6 +12,88 @@ from ..core.base_agent import BaseAgent
 from ..core.config import Settings, get_settings
 from ..core.database import DatabaseService, get_database
 from ..core.orchestrator import Orchestrator
+
+
+@dataclass
+class ResearchContext:
+    """Tracks the context of an ongoing research session."""
+
+    topic: str = ""
+    original_query: str = ""
+    started_at: datetime = field(default_factory=datetime.now)
+    queries_made: list[str] = field(default_factory=list)
+    raw_findings: list[dict[str, Any]] = field(default_factory=list)
+    validated_findings: list[dict[str, Any]] = field(default_factory=list)
+    removed_findings: list[dict[str, Any]] = field(default_factory=list)
+    sources_explored: set[str] = field(default_factory=set)
+    key_facts: list[str] = field(default_factory=list)
+    follow_up_queries: list[str] = field(default_factory=list)
+
+    def reset(self, new_topic: str = "", new_query: str = "") -> None:
+        """Reset the context for a new research session."""
+        self.topic = new_topic
+        self.original_query = new_query
+        self.started_at = datetime.now()
+        self.queries_made = [new_query] if new_query else []
+        self.raw_findings.clear()
+        self.validated_findings.clear()
+        self.removed_findings.clear()
+        self.sources_explored.clear()
+        self.key_facts.clear()
+        self.follow_up_queries.clear()
+
+    def add_findings(self, findings: list[dict[str, Any]]) -> None:
+        """Add raw findings to the context."""
+        for f in findings:
+            self.raw_findings.append(f)
+            url = f.get("url", "")
+            if url:
+                self.sources_explored.add(url)
+
+    def add_validated(self, validated: list[dict[str, Any]], removed: list[dict[str, Any]]) -> None:
+        """Add validation results to the context."""
+        self.validated_findings.extend(validated)
+        self.removed_findings.extend(removed)
+
+        # Extract key facts from validated findings
+        for f in validated:
+            snippet = f.get("snippet", "")
+            if snippet and len(snippet) > 20:
+                self.key_facts.append(snippet[:200])
+
+    def add_follow_up(self, query: str) -> None:
+        """Record a follow-up query."""
+        self.follow_up_queries.append(query)
+        self.queries_made.append(query)
+
+    def get_summary(self) -> str:
+        """Get a summary of the current research context."""
+        parts = [
+            f"Topic: {self.topic}",
+            f"Original query: {self.original_query}",
+            f"Queries made: {len(self.queries_made)}",
+            f"Sources explored: {len(self.sources_explored)}",
+            f"Raw findings: {len(self.raw_findings)}",
+            f"Validated findings: {len(self.validated_findings)}",
+            f"Removed findings: {len(self.removed_findings)}",
+        ]
+        return "\n".join(parts)
+
+    def get_context_for_agent(self) -> dict[str, Any]:
+        """Get context dict to pass to agents for follow-up queries."""
+        return {
+            "topic": self.topic,
+            "original_query": self.original_query,
+            "previous_queries": self.queries_made.copy(),
+            "sources_already_explored": list(self.sources_explored),
+            "key_facts_found": self.key_facts[:10],  # Limit to top 10
+            "validated_findings_count": len(self.validated_findings),
+            "is_follow_up": len(self.queries_made) > 1,
+        }
+
+    def is_active(self) -> bool:
+        """Check if there's an active research context."""
+        return bool(self.topic or self.original_query)
 
 
 class MainAgent(BaseAgent):
@@ -33,6 +117,7 @@ class MainAgent(BaseAgent):
         self.current_query: str = ""
         self.current_report: str | None = None
         self.current_report_title: str | None = None
+        self.research_context = ResearchContext()
         self._db_initialized = False
 
     async def _ensure_db_initialized(self) -> None:
@@ -53,19 +138,22 @@ class MainAgent(BaseAgent):
         """Get current state information for the system prompt."""
         parts = []
 
+        # Research context info
+        if self.research_context.is_active():
+            parts.append(f"- ACTIVE RESEARCH: '{self.research_context.topic}'")
+            parts.append(f"  - Queries made: {len(self.research_context.queries_made)}")
+            parts.append(f"  - Sources explored: {len(self.research_context.sources_explored)}")
+            parts.append(f"  - Validated findings: {len(self.research_context.validated_findings)}")
+            if self.research_context.follow_up_queries:
+                parts.append(f"  - Follow-up queries: {len(self.research_context.follow_up_queries)}")
+        else:
+            parts.append("- No active research context")
+
         if self.current_report:
             parts.append(f"- REPORT AVAILABLE: '{self.current_report_title}' (ready to save)")
-        else:
-            parts.append("- No report currently available")
 
         if self.pending_validation:
             parts.append(f"- Pending validation: {len(self.pending_validation)} findings")
-
-        if self.validated_findings:
-            parts.append(f"- Validated findings: {len(self.validated_findings)}")
-
-        if self.research_cache:
-            parts.append(f"- Research cache: {len(self.research_cache)} items")
 
         return "\n".join(parts) if parts else "No active research session"
 
@@ -594,6 +682,7 @@ Always validate research before creating reports to ensure accuracy. All data is
         self.pending_validation.clear()
         self.current_report = None
         self.current_report_title = None
+        self.research_context.reset()
 
     def get_validation_status(self) -> dict[str, Any]:
         """Get current validation status."""
@@ -603,6 +692,10 @@ Always validate research before creating reports to ensure accuracy. All data is
             "research_cache_items": len(self.research_cache),
             "has_report": self.current_report is not None,
             "report_title": self.current_report_title,
+            "context_active": self.research_context.is_active(),
+            "context_topic": self.research_context.topic,
+            "context_queries": len(self.research_context.queries_made),
+            "context_sources": len(self.research_context.sources_explored),
         }
 
     async def chat(self, message: str) -> str:

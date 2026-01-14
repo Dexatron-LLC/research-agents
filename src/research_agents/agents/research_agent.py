@@ -68,12 +68,28 @@ class ResearchAgent(BaseAgent):
             data = response.json()
             return data["content"][0]["text"]
 
-    async def _generate_search_queries(self, topic: str) -> list[str]:
+    async def _generate_search_queries(self, topic: str, research_context: dict[str, Any] | None = None) -> list[str]:
         """Generate multiple search queries to explore a topic thoroughly."""
         self._log("Generating search queries...")
 
-        prompt = f"""Generate 3 different search queries to thoroughly research this topic: "{topic}"
+        # Build context-aware prompt for follow-up queries
+        context_info = ""
+        if research_context and research_context.get("is_follow_up"):
+            original_topic = research_context.get("topic", "")
+            previous_queries = research_context.get("previous_queries", [])
+            key_facts = research_context.get("key_facts_found", [])
 
+            context_info = f"""
+This is a FOLLOW-UP query in the context of ongoing research about: "{original_topic}"
+Previous queries made: {previous_queries}
+Key facts already discovered:
+{chr(10).join(f'- {fact[:100]}' for fact in key_facts[:5])}
+
+Generate queries that dig DEEPER into this specific aspect, avoiding repetition of previous queries.
+"""
+
+        prompt = f"""Generate 3 different search queries to thoroughly research this topic: "{topic}"
+{context_info}
 The queries should:
 1. The main topic query
 2. A query that explores a specific aspect or subtopic
@@ -221,7 +237,8 @@ SUMMARY:
 
         Args:
             task: The research question or topic
-            context: Optional context with settings like 'depth' (quick/normal/thorough)
+            context: Optional context with settings like 'depth' (quick/normal/thorough),
+                     'research_context' for follow-up queries, 'exclude_urls' to skip
 
         Returns:
             Dictionary containing comprehensive research findings
@@ -229,9 +246,16 @@ SUMMARY:
         context = context or {}
         depth = context.get("depth", "normal")
         self.verbose = context.get("verbose", self.verbose)
+        exclude_urls = set(context.get("exclude_urls", []))
+        research_context = context.get("research_context", {})
 
         self._log(f"Starting research on: {task}")
         self._log(f"Depth: {depth}", indent=1)
+
+        # Log if this is a follow-up query
+        if research_context.get("is_follow_up"):
+            self._log(f"Follow-up query in context of: {research_context.get('topic', 'unknown')}", indent=1)
+            self._log(f"Excluding {len(exclude_urls)} already-explored URLs", indent=1)
 
         # Determine search parameters based on depth
         if depth == "quick":
@@ -247,8 +271,8 @@ SUMMARY:
         all_search_results = []
         sources: set[str] = set()
 
-        # Step 1: Generate search queries
-        queries = await self._generate_search_queries(task)
+        # Step 1: Generate search queries (with context for follow-ups)
+        queries = await self._generate_search_queries(task, research_context)
         queries = queries[:num_queries]
 
         # Step 2: Perform searches
@@ -259,6 +283,10 @@ SUMMARY:
             self._log(f"Found {len(results)} results", indent=2)
             for result in results:
                 if result.url and result.url not in sources:
+                    # Skip URLs that have already been explored in context
+                    if result.url in exclude_urls:
+                        self._log(f"Skipping (already explored): {result.url[:50]}...", indent=3)
+                        continue
                     all_search_results.append(result)
                     sources.add(result.url)
 

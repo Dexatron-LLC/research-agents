@@ -474,6 +474,7 @@ Consider:
         findings: list[dict[str, Any]],
         min_confidence: float = 0.4,
         mode: str = "normal",
+        research_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate a list of research findings.
 
@@ -481,11 +482,18 @@ Consider:
             findings: List of findings with 'title', 'snippet', 'url'
             min_confidence: Minimum confidence threshold (default 0.4 for more lenient validation)
             mode: Validation mode - 'strict', 'normal', or 'lenient'
+            research_context: Optional context from previous research for follow-up validation
 
         Returns:
             Dictionary with validated, removed, and stats
         """
         self._log(f"Validating {len(findings)} findings (mode={mode}, min_confidence={min_confidence:.0%})")
+
+        # Use context if this is a follow-up query
+        if research_context and research_context.get("is_follow_up"):
+            self._log(f"Follow-up validation in context of: {research_context.get('topic', 'unknown')}", indent=1)
+            # Previously validated facts can help corroborate new findings
+            self._log(f"Prior validated findings: {research_context.get('validated_findings_count', 0)}", indent=1)
 
         validated = []
         removed = []
