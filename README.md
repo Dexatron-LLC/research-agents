@@ -84,10 +84,14 @@ Assistant: [Validates findings against trusted sources and auto-generates a repo
 | Command | Description |
 |---------|-------------|
 | `research <query>` | Search for information on a topic |
+| `validate` | Validate pending research findings |
 | `quit` / `exit` | Exit the application |
 | `clear` | Clear the conversation history |
+| `cache` | Display research cache count |
+| `clearcache` | Clear research cache |
 | `status` | Show current validation status |
-| `cache` | Display research cache contents |
+| `agents` | List available agents |
+| `history` | Show execution history |
 | `dbstats` | Show database statistics for current session |
 | `dbreports` | List all reports in the database |
 
