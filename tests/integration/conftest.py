@@ -136,8 +136,8 @@ async def full_agent_system(
         return_value=mock_search_tool,
     )
 
-    # Create agents
-    research_agent = ResearchAgent(settings=integration_settings)
+    # Create agents (with verbose=False for cleaner test output)
+    research_agent = ResearchAgent(settings=integration_settings, verbose=False)
     research_agent.search_tool = mock_search_tool
 
     # Mock the research agent's LLM-dependent methods for integration tests
@@ -157,7 +157,7 @@ async def full_agent_system(
     research_agent._generate_search_queries = mock_generate_queries
     research_agent._analyze_content = mock_analyze_content
 
-    validation_agent = ValidationAgent(integration_settings)
+    validation_agent = ValidationAgent(integration_settings, verbose=False)
     validation_agent.search_tool = mock_search_tool
 
     # Mock the validation agent's LLM-dependent methods for integration tests

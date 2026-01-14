@@ -32,10 +32,17 @@ class ValidationAgent(BaseAgent):
         "theguardian.com",
     ]
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, verbose: bool = True):
         super().__init__(name="validation")
         self.settings = settings or get_settings()
         self.search_tool = WebSearchTool()
+        self.verbose = verbose
+
+    def _log(self, message: str, indent: int = 0) -> None:
+        """Print a verbose log message."""
+        if self.verbose:
+            prefix = "  " * indent
+            print(f"{prefix}[Validation] {message}")
 
     def _is_trusted_source(self, url: str) -> bool:
         """Check if a URL is from a trusted domain."""
@@ -148,7 +155,8 @@ Be precise and quote specific passages when possible."""
         try:
             content = await self.search_tool.fetch_page(url, max_content_length=12000)
             return content
-        except Exception:
+        except Exception as e:
+            self._log(f"FAILED to fetch: {url[:50]}... ({type(e).__name__})", indent=3)
             return None
 
     async def _analyze_source_content(
@@ -159,6 +167,8 @@ Be precise and quote specific passages when possible."""
         content: str,
     ) -> dict[str, Any]:
         """Analyze source content for evidence supporting or contradicting a claim."""
+        self._log(f"Analyzing: {title[:40]}...", indent=3)
+
         prompt = f"""Analyze this source content for evidence about the following claim:
 
 CLAIM: "{claim}"
@@ -210,6 +220,9 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
             elif current_section == "analysis" and line:
                 analysis += " " + line
 
+        trust_level = self._get_trust_level(url)
+        self._log(f"Result: relevance={relevance}, supports={supports}, trust={trust_level}", indent=4)
+
         return {
             "url": url,
             "title": title,
@@ -217,7 +230,7 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
             "supports_claim": supports,
             "evidence": evidence,
             "analysis": analysis.strip(),
-            "trust_level": self._get_trust_level(url),
+            "trust_level": trust_level,
         }
 
     def _parse_validation_result(self, llm_response: str) -> dict[str, Any]:
@@ -252,6 +265,8 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
         Returns:
             Validation result with status, confidence, reason, evidence, and sources
         """
+        self._log(f"Validating claim: {claim[:60]}...")
+
         # Step 1: Search for validation using trusted source keywords
         search_queries = [
             f"{claim} site:wikipedia.org OR site:edu OR site:gov",
@@ -261,8 +276,11 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
         all_trusted_results = []
         seen_urls: set[str] = set()
 
+        self._log("Searching trusted sources...", indent=1)
         for query in search_queries:
+            self._log(f"Query: {query[:50]}...", indent=2)
             search_results = self.search_tool.search(query, num_results=8)
+            trusted_count = 0
             for result in search_results:
                 if self._is_trusted_source(result.url) and result.url not in seen_urls:
                     all_trusted_results.append({
@@ -271,23 +289,36 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
                         "snippet": result.snippet,
                     })
                     seen_urls.add(result.url)
+                    trusted_count += 1
+            self._log(f"Found {trusted_count} trusted sources", indent=2)
 
             if len(all_trusted_results) >= 5:
                 break
+
+        self._log(f"Total trusted sources found: {len(all_trusted_results)}", indent=1)
 
         # Step 2: Fetch and analyze content from top trusted sources
         sources_to_analyze = all_trusted_results[:3]
         analyzed_sources = []
 
         if sources_to_analyze:
+            self._log(f"Fetching {len(sources_to_analyze)} pages for analysis...", indent=1)
+
             # Fetch pages in parallel
+            for source in sources_to_analyze:
+                self._log(f"Fetching: {source['url'][:50]}...", indent=2)
+
             fetch_tasks = [
                 self._fetch_page_content(source["url"])
                 for source in sources_to_analyze
             ]
             fetched_pages = await asyncio.gather(*fetch_tasks)
 
+            successful_fetches = sum(1 for p in fetched_pages if p and p.get("content"))
+            self._log(f"Successfully fetched {successful_fetches}/{len(sources_to_analyze)} pages", indent=1)
+
             # Analyze each page
+            self._log("Analyzing source content...", indent=1)
             analysis_tasks = []
             for source, page_content in zip(sources_to_analyze, fetched_pages):
                 if page_content and page_content.get("content"):
@@ -303,7 +334,11 @@ ANALYSIS: [Brief analysis of how this source relates to the claim]"""
             if analysis_tasks:
                 analyzed_sources = await asyncio.gather(*analysis_tasks)
 
+            self._log(f"Analyzed {len(analyzed_sources)} sources", indent=1)
+
         # Step 3: Synthesize validation result using LLM
+        self._log("Synthesizing validation result...", indent=1)
+
         if analyzed_sources:
             # Build detailed evidence summary
             evidence_summary = []
@@ -369,6 +404,10 @@ Provide your assessment based on the lack of corroborating evidence."""
         result["trusted_results_found"] = len(all_trusted_results)
         result["sources_analyzed"] = len(analyzed_sources)
 
+        # Log final result
+        status_symbol = "PASS" if result["status"] in ("VERIFIED", "PARTIALLY_VERIFIED") else "FAIL"
+        self._log(f"Result: {status_symbol} - {result['status']} (confidence: {result['confidence']:.0%})", indent=1)
+
         return result
 
     async def validate_findings(
@@ -385,10 +424,13 @@ Provide your assessment based on the lack of corroborating evidence."""
         Returns:
             Dictionary with validated, removed, and stats
         """
+        self._log(f"Validating {len(findings)} findings (min confidence: {min_confidence:.0%})...")
+
         validated = []
         removed = []
 
-        for finding in findings:
+        for i, finding in enumerate(findings, 1):
+            self._log(f"--- Finding {i}/{len(findings)} ---")
             claim = f"{finding.get('title', '')}: {finding.get('snippet', '')}"
             original_url = finding.get("url", "")
 
@@ -401,8 +443,12 @@ Provide your assessment based on the lack of corroborating evidence."""
 
             if result["status"] in ("VERIFIED", "PARTIALLY_VERIFIED") and result["confidence"] >= min_confidence:
                 validated.append(finding_with_validation)
+                self._log(f"Finding {i}: ACCEPTED", indent=1)
             else:
                 removed.append(finding_with_validation)
+                self._log(f"Finding {i}: REJECTED ({result['status']}, {result['confidence']:.0%})", indent=1)
+
+        self._log(f"Validation complete: {len(validated)} accepted, {len(removed)} rejected")
 
         return {
             "validated": validated,
@@ -426,6 +472,7 @@ Provide your assessment based on the lack of corroborating evidence."""
             Dictionary containing validation results
         """
         context = context or {}
+        self.verbose = context.get("verbose", self.verbose)
 
         # Single claim validation
         if context.get("claim"):

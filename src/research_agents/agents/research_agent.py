@@ -13,10 +13,17 @@ from ..tools.web_search import WebSearchTool
 class ResearchAgent(BaseAgent):
     """Agent specialized in thorough research using web search and content analysis."""
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, verbose: bool = True):
         super().__init__(name="research")
         self.settings = settings or get_settings()
         self.search_tool = WebSearchTool()
+        self.verbose = verbose
+
+    def _log(self, message: str, indent: int = 0) -> None:
+        """Print a verbose log message."""
+        if self.verbose:
+            prefix = "  " * indent
+            print(f"{prefix}[Research] {message}")
 
     def _get_research_system_prompt(self) -> str:
         """Get system prompt for research analysis."""
@@ -63,6 +70,8 @@ class ResearchAgent(BaseAgent):
 
     async def _generate_search_queries(self, topic: str) -> list[str]:
         """Generate multiple search queries to explore a topic thoroughly."""
+        self._log("Generating search queries...")
+
         prompt = f"""Generate 3 different search queries to thoroughly research this topic: "{topic}"
 
 The queries should:
@@ -75,21 +84,30 @@ Return only the queries, one per line, no numbering or explanations."""
         result = await self._call_llm(prompt, system_prompt="You are a search query generator. Output only search queries, one per line.")
 
         if result.startswith("Error:"):
+            self._log(f"Query generation failed, using original topic", indent=1)
             return [topic]  # Fallback to original topic
 
         queries = [q.strip() for q in result.strip().split("\n") if q.strip()]
-        return queries[:3] if queries else [topic]
+        queries = queries[:3] if queries else [topic]
+
+        for i, q in enumerate(queries, 1):
+            self._log(f"Query {i}: {q}", indent=1)
+
+        return queries
 
     async def _fetch_page_content(self, url: str) -> dict[str, Any] | None:
         """Fetch and return page content, handling errors gracefully."""
         try:
             content = await self.search_tool.fetch_page(url, max_content_length=15000)
             return content
-        except Exception:
+        except Exception as e:
+            self._log(f"FAILED to fetch: {url[:60]}... ({type(e).__name__})", indent=2)
             return None
 
     async def _analyze_content(self, url: str, title: str, content: str, topic: str) -> dict[str, Any]:
         """Use LLM to analyze page content and extract relevant findings."""
+        self._log(f"Analyzing: {title[:50]}...", indent=2)
+
         prompt = f"""Analyze this web page content for information about: "{topic}"
 
 Source: {title}
@@ -122,6 +140,7 @@ SUMMARY:
         result = await self._call_llm(prompt)
 
         if result.startswith("Error:"):
+            self._log(f"Analysis FAILED: {result}", indent=3)
             return {
                 "url": url,
                 "title": title,
@@ -157,6 +176,8 @@ SUMMARY:
             elif current_section == "summary" and line:
                 summary += line + " "
 
+        self._log(f"Found {len(findings)} findings, credibility: {credibility}", indent=3)
+
         return {
             "url": url,
             "title": title,
@@ -168,6 +189,8 @@ SUMMARY:
 
     async def _synthesize_research(self, topic: str, analyzed_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Synthesize findings from multiple sources into coherent research results."""
+        self._log("Synthesizing findings from all sources...")
+
         # Compile all findings
         all_findings = []
         for source in analyzed_sources:
@@ -190,6 +213,7 @@ SUMMARY:
                 "credibility": f["credibility"],
             })
 
+        self._log(f"Synthesized {len(findings)} total findings", indent=1)
         return findings
 
     async def execute(self, task: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -204,6 +228,10 @@ SUMMARY:
         """
         context = context or {}
         depth = context.get("depth", "normal")
+        self.verbose = context.get("verbose", self.verbose)
+
+        self._log(f"Starting research on: {task}")
+        self._log(f"Depth: {depth}", indent=1)
 
         # Determine search parameters based on depth
         if depth == "quick":
@@ -224,14 +252,20 @@ SUMMARY:
         queries = queries[:num_queries]
 
         # Step 2: Perform searches
+        self._log("Searching the web...")
         for query in queries:
+            self._log(f"Searching: {query[:50]}...", indent=1)
             results = self.search_tool.search(query, num_results=5)
+            self._log(f"Found {len(results)} results", indent=2)
             for result in results:
                 if result.url and result.url not in sources:
                     all_search_results.append(result)
                     sources.add(result.url)
 
+        self._log(f"Total unique results: {len(all_search_results)}")
+
         if not all_search_results:
+            self._log("No search results found!")
             return {
                 "task": task,
                 "status": "completed",
@@ -244,13 +278,22 @@ SUMMARY:
         pages_to_analyze = all_search_results[:pages_to_fetch]
         analyzed_sources = []
 
+        self._log(f"Fetching {len(pages_to_analyze)} pages...")
+        for result in pages_to_analyze:
+            self._log(f"Fetching: {result.url[:60]}...", indent=1)
+
         fetch_tasks = [
             self._fetch_page_content(result.url)
             for result in pages_to_analyze
         ]
         fetched_pages = await asyncio.gather(*fetch_tasks)
 
+        # Count successful fetches
+        successful_fetches = sum(1 for p in fetched_pages if p and p.get("content"))
+        self._log(f"Successfully fetched {successful_fetches}/{len(pages_to_analyze)} pages")
+
         # Step 4: Analyze each fetched page
+        self._log("Analyzing page content...")
         analysis_tasks = []
         for result, page_content in zip(pages_to_analyze, fetched_pages):
             if page_content and page_content.get("content"):
@@ -266,6 +309,8 @@ SUMMARY:
         if analysis_tasks:
             analyzed_sources = await asyncio.gather(*analysis_tasks)
 
+        self._log(f"Analyzed {len(analyzed_sources)} pages")
+
         # Step 5: Synthesize findings
         findings = await self._synthesize_research(task, analyzed_sources)
 
@@ -278,6 +323,8 @@ SUMMARY:
                 "source": "Search Result",
                 "credibility": "unverified",
             })
+
+        self._log(f"Research complete: {len(findings)} findings from {len(sources)} sources")
 
         return {
             "task": task,
