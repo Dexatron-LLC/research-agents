@@ -187,9 +187,9 @@ async def chat_loop(
             if user_input.lower() == "research" or user_input.lower().startswith("research "):
                 query = user_input[8:].strip() if len(user_input) > 8 else ""
                 if query:
-                    # Reset context for new research
-                    main_agent.research_context.reset(new_topic=query, new_query=query)
+                    # Clear cache first, then reset context with new topic
                     main_agent.clear_research_cache()
+                    main_agent.research_context.reset(new_topic=query, new_query=query)
                     print(f"Starting new research context: {query}")
 
                     settings = get_settings()
