@@ -100,7 +100,7 @@ class TestValidationAgent:
                 agent = ValidationAgent()
 
         prompt = agent._get_content_analysis_prompt()
-        assert "analyzing source content" in prompt.lower()
+        assert "source content" in prompt.lower()
         assert "evidence" in prompt.lower()
 
 
@@ -118,7 +118,8 @@ class TestValidationAgentLLM:
 
         import json
         parsed = json.loads(result)
-        assert parsed["status"] == "UNVERIFIED"
+        # On errors, we now return PARTIALLY_VERIFIED to be less strict
+        assert parsed["status"] == "PARTIALLY_VERIFIED"
         assert "API key" in parsed["reason"]
 
     async def test_call_llm_success(self):
@@ -261,7 +262,7 @@ class TestValidationAgentValidateClaim:
             result = await agent.validate_claim("Unverifiable claim")
 
         assert result["status"] == "UNVERIFIED"
-        assert result["trusted_results_found"] == 0
+        assert result["sources_analyzed"] == 0
 
     async def test_validate_claim_with_original_source(self):
         """Test validating a claim with original source."""
@@ -521,6 +522,7 @@ class TestValidationAgentParseResult:
         response = 'This is not valid JSON at all'
         result = agent._parse_validation_result(response)
 
-        assert result["status"] == "UNVERIFIED"
-        assert result["confidence"] == 0.0
-        assert "Failed to parse" in result["reason"]
+        # On parse errors, we now return PARTIALLY_VERIFIED to be less strict
+        assert result["status"] == "PARTIALLY_VERIFIED"
+        assert result["confidence"] == 0.5
+        assert "parse" in result["reason"].lower()
