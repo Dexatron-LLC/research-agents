@@ -160,6 +160,20 @@ async def full_agent_system(
     validation_agent = ValidationAgent(integration_settings)
     validation_agent.search_tool = mock_search_tool
 
+    # Mock the validation agent's LLM-dependent methods for integration tests
+    async def mock_analyze_source(claim: str, url: str, title: str, content: str):
+        return {
+            "url": url,
+            "title": title,
+            "relevance": "high",
+            "supports_claim": "yes",
+            "evidence": [f"Evidence supporting: {claim[:50]}"],
+            "analysis": "Analysis of the source content",
+            "trust_level": "medium",
+        }
+
+    validation_agent._analyze_source_content = mock_analyze_source
+
     report_agent = ReportAgent(integration_settings)
 
     main_agent = MainAgent(

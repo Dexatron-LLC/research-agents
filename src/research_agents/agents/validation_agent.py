@@ -1,5 +1,6 @@
-"""Validation agent that fact-checks research findings against authoritative sources."""
+"""Validation agent that performs thorough fact-checking against authoritative sources."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -11,7 +12,7 @@ from ..tools.web_search import WebSearchTool
 
 
 class ValidationAgent(BaseAgent):
-    """Agent specialized in validating research findings against trusted sources."""
+    """Agent specialized in thorough validation of research findings against trusted sources."""
 
     # Trusted domains for fact-checking
     TRUSTED_DOMAINS = [
@@ -37,19 +38,31 @@ class ValidationAgent(BaseAgent):
         self.search_tool = WebSearchTool()
 
     def _is_trusted_source(self, url: str) -> bool:
-        """Check if a URL is from a trusted domain.
-
-        Args:
-            url: The URL to check
-
-        Returns:
-            True if the URL is from a trusted domain
-        """
+        """Check if a URL is from a trusted domain."""
         url_lower = url.lower()
         for domain in self.TRUSTED_DOMAINS:
             if domain in url_lower:
                 return True
         return False
+
+    def _get_trust_level(self, url: str) -> str:
+        """Get the trust level of a source based on its domain."""
+        url_lower = url.lower()
+
+        # Highest trust: academic and scientific
+        high_trust = ["scholar.google.com", "pubmed.ncbi.nlm.nih.gov", "arxiv.org",
+                      "nature.com", "science.org", "sciencedirect.com", ".edu", ".gov"]
+        for domain in high_trust:
+            if domain in url_lower:
+                return "high"
+
+        # Medium trust: reputable encyclopedias and news
+        medium_trust = ["wikipedia.org", "reuters.com", "apnews.com", "bbc.com"]
+        for domain in medium_trust:
+            if domain in url_lower:
+                return "medium"
+
+        return "low"
 
     def _get_validation_system_prompt(self) -> str:
         """Get system prompt for validation tasks."""
@@ -57,29 +70,47 @@ class ValidationAgent(BaseAgent):
 
         validation_instructions = """
 ## Validation Task
-You are validating a research claim. Analyze the search results and determine if the claim is:
-- VERIFIED: Multiple trusted sources confirm the claim
-- PARTIALLY_VERIFIED: Some evidence supports it, but incomplete
-- UNVERIFIED: No credible evidence found
-- CONTRADICTED: Trusted sources contradict the claim
+You are validating a research claim against source content. Analyze thoroughly and determine:
+- VERIFIED: Multiple trusted sources confirm the claim with specific evidence
+- PARTIALLY_VERIFIED: Some evidence supports it, but details differ or are incomplete
+- UNVERIFIED: No credible evidence found to support the claim
+- CONTRADICTED: Trusted sources provide evidence contradicting the claim
+
+When analyzing:
+1. Look for specific facts, statistics, or statements that support or contradict the claim
+2. Note if the sources are discussing the same topic/context as the claim
+3. Consider the recency and authority of the sources
+4. Extract direct quotes or evidence from the content
 
 Respond with a JSON object:
 {
     "status": "VERIFIED|PARTIALLY_VERIFIED|UNVERIFIED|CONTRADICTED",
     "confidence": 0.0-1.0,
-    "reason": "Brief explanation",
+    "reason": "Detailed explanation with specific evidence",
+    "evidence": ["Direct quotes or specific facts from sources"],
     "sources": ["list of supporting source URLs"]
 }"""
 
         return f"{base_prompt}\n{validation_instructions}"
 
-    async def _call_llm(self, prompt: str) -> str:
+    def _get_content_analysis_prompt(self) -> str:
+        """Get system prompt for analyzing source content against a claim."""
+        return """You are analyzing source content to find evidence for or against a claim.
+Extract:
+1. Any statements that directly support or contradict the claim
+2. Relevant statistics or data
+3. The context and authority of the information
+
+Be precise and quote specific passages when possible."""
+
+    async def _call_llm(self, prompt: str, system_prompt: str | None = None) -> str:
         """Call the LLM API for validation analysis."""
         if not self.settings.api_key:
             return json.dumps({
                 "status": "UNVERIFIED",
                 "confidence": 0.0,
                 "reason": "API key not configured",
+                "evidence": [],
                 "sources": []
             })
 
@@ -92,9 +123,9 @@ Respond with a JSON object:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": self.settings.fast_model,  # Use fast model for validation
-                    "max_tokens": 1024,
-                    "system": self._get_validation_system_prompt(),
+                    "model": self.settings.fast_model,
+                    "max_tokens": 2048,
+                    "system": system_prompt or self._get_validation_system_prompt(),
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=self.settings.request_timeout,
@@ -105,11 +136,89 @@ Respond with a JSON object:
                     "status": "UNVERIFIED",
                     "confidence": 0.0,
                     "reason": f"API error: {response.status_code}",
+                    "evidence": [],
                     "sources": []
                 })
 
             data = response.json()
             return data["content"][0]["text"]
+
+    async def _fetch_page_content(self, url: str) -> dict[str, Any] | None:
+        """Fetch page content, handling errors gracefully."""
+        try:
+            content = await self.search_tool.fetch_page(url, max_content_length=12000)
+            return content
+        except Exception:
+            return None
+
+    async def _analyze_source_content(
+        self,
+        claim: str,
+        url: str,
+        title: str,
+        content: str,
+    ) -> dict[str, Any]:
+        """Analyze source content for evidence supporting or contradicting a claim."""
+        prompt = f"""Analyze this source content for evidence about the following claim:
+
+CLAIM: "{claim}"
+
+SOURCE: {title}
+URL: {url}
+
+CONTENT:
+{content[:8000]}
+
+Find and extract:
+1. Any statements that directly relate to the claim
+2. Supporting or contradicting evidence
+3. Relevant statistics or facts
+4. The credibility and context of the information
+
+Format your response as:
+RELEVANCE: [high/medium/low/none]
+SUPPORTS_CLAIM: [yes/partially/no/contradicts]
+EVIDENCE:
+- [specific quote or fact 1]
+- [specific quote or fact 2]
+ANALYSIS: [Brief analysis of how this source relates to the claim]"""
+
+        result = await self._call_llm(prompt, system_prompt=self._get_content_analysis_prompt())
+
+        # Parse the response
+        relevance = "low"
+        supports = "no"
+        evidence = []
+        analysis = ""
+
+        lines = result.split("\n")
+        current_section = None
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith("RELEVANCE:"):
+                relevance = line.replace("RELEVANCE:", "").strip().lower()
+            elif line.startswith("SUPPORTS_CLAIM:"):
+                supports = line.replace("SUPPORTS_CLAIM:", "").strip().lower()
+            elif line.startswith("EVIDENCE:"):
+                current_section = "evidence"
+            elif line.startswith("ANALYSIS:"):
+                current_section = "analysis"
+                analysis = line.replace("ANALYSIS:", "").strip()
+            elif line.startswith("- ") and current_section == "evidence":
+                evidence.append(line[2:])
+            elif current_section == "analysis" and line:
+                analysis += " " + line
+
+        return {
+            "url": url,
+            "title": title,
+            "relevance": relevance,
+            "supports_claim": supports,
+            "evidence": evidence,
+            "analysis": analysis.strip(),
+            "trust_level": self._get_trust_level(url),
+        }
 
     def _parse_validation_result(self, llm_response: str) -> dict[str, Any]:
         """Parse the LLM's validation response."""
@@ -117,7 +226,11 @@ Respond with a JSON object:
             start = llm_response.find("{")
             end = llm_response.rfind("}") + 1
             if start != -1 and end > start:
-                return json.loads(llm_response[start:end])
+                result = json.loads(llm_response[start:end])
+                # Ensure evidence field exists
+                if "evidence" not in result:
+                    result["evidence"] = []
+                return result
         except json.JSONDecodeError:
             pass
 
@@ -125,74 +238,136 @@ Respond with a JSON object:
             "status": "UNVERIFIED",
             "confidence": 0.0,
             "reason": "Failed to parse validation result",
+            "evidence": [],
             "sources": []
         }
 
     async def validate_claim(self, claim: str, original_source: str = "") -> dict[str, Any]:
-        """Validate a single claim against trusted sources.
+        """Validate a single claim with thorough source analysis.
 
         Args:
             claim: The claim to validate
             original_source: The original source URL of the claim
 
         Returns:
-            Validation result with status, confidence, reason, and sources
+            Validation result with status, confidence, reason, evidence, and sources
         """
-        # Search for validation using trusted source keywords
-        search_query = f"{claim} site:wikipedia.org OR site:edu OR site:gov OR site:nature.com"
-        search_results = self.search_tool.search(search_query, num_results=8)
+        # Step 1: Search for validation using trusted source keywords
+        search_queries = [
+            f"{claim} site:wikipedia.org OR site:edu OR site:gov",
+            claim,  # Broader search as backup
+        ]
 
-        # Filter to only trusted sources
-        trusted_results = []
-        for result in search_results:
-            if self._is_trusted_source(result.url):
-                trusted_results.append({
-                    "title": result.title,
-                    "url": result.url,
-                    "snippet": result.snippet,
-                })
+        all_trusted_results = []
+        seen_urls: set[str] = set()
 
-        if not trusted_results:
-            # Try a broader search
-            search_results = self.search_tool.search(claim, num_results=10)
+        for query in search_queries:
+            search_results = self.search_tool.search(query, num_results=8)
             for result in search_results:
-                if self._is_trusted_source(result.url):
-                    trusted_results.append({
+                if self._is_trusted_source(result.url) and result.url not in seen_urls:
+                    all_trusted_results.append({
                         "title": result.title,
                         "url": result.url,
                         "snippet": result.snippet,
                     })
+                    seen_urls.add(result.url)
 
-        # Build prompt for LLM analysis
-        if trusted_results:
-            sources_text = "\n".join(
-                f"- [{r['title']}]({r['url']}): {r['snippet']}"
-                for r in trusted_results
-            )
-            prompt = f"""Validate this claim:
-"{claim}"
+            if len(all_trusted_results) >= 5:
+                break
 
-Original source: {original_source or 'Unknown'}
+        # Step 2: Fetch and analyze content from top trusted sources
+        sources_to_analyze = all_trusted_results[:3]
+        analyzed_sources = []
+
+        if sources_to_analyze:
+            # Fetch pages in parallel
+            fetch_tasks = [
+                self._fetch_page_content(source["url"])
+                for source in sources_to_analyze
+            ]
+            fetched_pages = await asyncio.gather(*fetch_tasks)
+
+            # Analyze each page
+            analysis_tasks = []
+            for source, page_content in zip(sources_to_analyze, fetched_pages):
+                if page_content and page_content.get("content"):
+                    analysis_tasks.append(
+                        self._analyze_source_content(
+                            claim=claim,
+                            url=source["url"],
+                            title=source["title"],
+                            content=page_content["content"],
+                        )
+                    )
+
+            if analysis_tasks:
+                analyzed_sources = await asyncio.gather(*analysis_tasks)
+
+        # Step 3: Synthesize validation result using LLM
+        if analyzed_sources:
+            # Build detailed evidence summary
+            evidence_summary = []
+            for source in analyzed_sources:
+                source_text = f"\n### Source: {source['title']} ({source['trust_level']} trust)\n"
+                source_text += f"URL: {source['url']}\n"
+                source_text += f"Relevance: {source['relevance']}\n"
+                source_text += f"Supports Claim: {source['supports_claim']}\n"
+                if source['evidence']:
+                    source_text += "Evidence:\n"
+                    for e in source['evidence']:
+                        source_text += f"  - {e}\n"
+                source_text += f"Analysis: {source['analysis']}\n"
+                evidence_summary.append(source_text)
+
+            prompt = f"""Based on thorough analysis of trusted sources, validate this claim:
+
+CLAIM: "{claim}"
+ORIGINAL SOURCE: {original_source or 'Unknown'}
+
+ANALYZED SOURCES AND EVIDENCE:
+{''.join(evidence_summary)}
+
+Additional search results (snippets only):
+{chr(10).join(f"- [{r['title']}]({r['url']}): {r['snippet']}" for r in all_trusted_results[3:6])}
+
+Provide your final validation assessment considering:
+1. How many sources support vs contradict the claim
+2. The trust level of supporting sources
+3. The strength and specificity of the evidence
+4. Any caveats or nuances in the claim"""
+        else:
+            # No detailed analysis available, use snippets only
+            if all_trusted_results:
+                sources_text = "\n".join(
+                    f"- [{r['title']}]({r['url']}): {r['snippet']}"
+                    for r in all_trusted_results[:5]
+                )
+                prompt = f"""Validate this claim based on search snippets:
+
+CLAIM: "{claim}"
+ORIGINAL SOURCE: {original_source or 'Unknown'}
 
 Search results from trusted sources:
 {sources_text}
 
-Analyze whether these trusted sources support, contradict, or are silent on this claim."""
-        else:
-            prompt = f"""Validate this claim:
-"{claim}"
+Note: Full page content could not be fetched. Base your assessment on available snippets."""
+            else:
+                prompt = f"""Validate this claim:
 
-Original source: {original_source or 'Unknown'}
+CLAIM: "{claim}"
+ORIGINAL SOURCE: {original_source or 'Unknown'}
 
 No results found from trusted sources (Wikipedia, .edu, .gov, scientific journals).
-
-Based on the lack of corroborating evidence from authoritative sources, provide your assessment."""
+Provide your assessment based on the lack of corroborating evidence."""
 
         llm_response = await self._call_llm(prompt)
         result = self._parse_validation_result(llm_response)
+
+        # Add metadata
         result["claim"] = claim
         result["original_source"] = original_source
-        result["trusted_results_found"] = len(trusted_results)
+        result["trusted_results_found"] = len(all_trusted_results)
+        result["sources_analyzed"] = len(analyzed_sources)
 
         return result
 
@@ -201,18 +376,17 @@ Based on the lack of corroborating evidence from authoritative sources, provide 
         findings: list[dict[str, Any]],
         min_confidence: float = 0.5,
     ) -> dict[str, Any]:
-        """Validate a list of research findings.
+        """Validate a list of research findings with thorough fact-checking.
 
         Args:
             findings: List of findings with 'title', 'snippet', 'url'
             min_confidence: Minimum confidence threshold to keep a finding
 
         Returns:
-            Dictionary with validated, removed, and replacement_needed lists
+            Dictionary with validated, removed, and stats
         """
         validated = []
         removed = []
-        replacement_needed = []
 
         for finding in findings:
             claim = f"{finding.get('title', '')}: {finding.get('snippet', '')}"
@@ -229,16 +403,10 @@ Based on the lack of corroborating evidence from authoritative sources, provide 
                 validated.append(finding_with_validation)
             else:
                 removed.append(finding_with_validation)
-                replacement_needed.append({
-                    "original_claim": claim,
-                    "removal_reason": result["reason"],
-                    "status": result["status"],
-                })
 
         return {
             "validated": validated,
             "removed": removed,
-            "replacement_needed": replacement_needed,
             "stats": {
                 "total": len(findings),
                 "validated_count": len(validated),
