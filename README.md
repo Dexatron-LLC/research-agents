@@ -83,6 +83,7 @@ Assistant: [Validates findings against trusted sources and auto-generates a repo
 
 | Command | Description |
 |---------|-------------|
+| `research <query>` | Search for information on a topic |
 | `quit` / `exit` | Exit the application |
 | `clear` | Clear the conversation history |
 | `status` | Show current validation status |
