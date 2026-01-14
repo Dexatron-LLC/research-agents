@@ -55,6 +55,13 @@ class Settings(BaseSettings):
         description="Path to SQLite database file",
     )
 
+    # Research Configuration
+    max_repeats: int = Field(
+        default=3,
+        alias="MAXREPEATS",
+        description="Maximum retry attempts when research validation fails",
+    )
+
     @property
     def api_key(self) -> str:
         """Alias for anthropic_api_key for convenience."""

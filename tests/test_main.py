@@ -369,6 +369,141 @@ class TestChatLoopCommands:
 
         assert any("Usage" in out for out in outputs)
 
+    async def test_research_command_retries_on_validation_failure(self):
+        """Test research command retries when validation fails."""
+        from research_agents.core.config import Settings
+
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session-123"
+        main_agent.validated_findings = []
+        main_agent.research_cache = []
+        main_agent.current_query = ""
+
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        # Return findings on each call
+        research_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "findings": [{"title": "Finding 1", "snippet": "Content 1"}],
+        })
+
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+        # First call: nothing validated, Second call: one validated
+        validation_agent.validate_findings = AsyncMock(side_effect=[
+            {"validated": [], "removed": [{"title": "Finding 1"}], "stats": {"validation_rate": 0.0}},
+            {"validated": [{"title": "Finding 2", "validation": {"confidence": 0.9}}], "removed": [], "stats": {"validation_rate": 1.0}},
+        ])
+
+        mock_report_agent = MagicMock()
+        mock_report_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "report": "# Research Report",
+        })
+
+        orchestrator = MagicMock()
+        orchestrator.get_agent = MagicMock(return_value=mock_report_agent)
+
+        mock_settings = MagicMock()
+        mock_settings.max_repeats = 3
+
+        outputs = []
+        with patch("builtins.input", side_effect=["research test topic", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                with patch("research_agents.main.get_settings", return_value=mock_settings):
+                    await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        # Should have called execute and validate_findings twice
+        assert research_agent.execute.call_count == 2
+        assert validation_agent.validate_findings.call_count == 2
+        output_text = "\n".join(outputs)
+        assert "Retrying" in output_text
+
+    async def test_research_command_respects_max_repeats(self):
+        """Test research command stops after max_repeats attempts."""
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session-123"
+        main_agent.validated_findings = []
+        main_agent.research_cache = []
+        main_agent.current_query = ""
+
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        research_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "findings": [{"title": "Finding 1", "snippet": "Content 1"}],
+        })
+
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+        # Always fail validation
+        validation_agent.validate_findings = AsyncMock(return_value={
+            "validated": [],
+            "removed": [{"title": "Finding 1"}],
+            "stats": {"validation_rate": 0.0},
+        })
+
+        orchestrator = MagicMock()
+
+        mock_settings = MagicMock()
+        mock_settings.max_repeats = 2  # Total 3 attempts (1 initial + 2 retries)
+
+        outputs = []
+        with patch("builtins.input", side_effect=["research test topic", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                with patch("research_agents.main.get_settings", return_value=mock_settings):
+                    await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        # Should have called exactly 3 times (1 initial + 2 retries)
+        assert research_agent.execute.call_count == 3
+        assert validation_agent.validate_findings.call_count == 3
+        output_text = "\n".join(outputs)
+        assert "after all attempts" in output_text
+
+    async def test_research_command_no_retry_when_validation_succeeds(self):
+        """Test research command doesn't retry when validation succeeds."""
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session-123"
+        main_agent.validated_findings = []
+        main_agent.research_cache = []
+        main_agent.current_query = ""
+
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        research_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "findings": [{"title": "Finding 1", "snippet": "Content 1"}],
+        })
+
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+        validation_agent.validate_findings = AsyncMock(return_value={
+            "validated": [{"title": "Finding 1", "validation": {"confidence": 0.9}}],
+            "removed": [],
+            "stats": {"validation_rate": 1.0},
+        })
+
+        mock_report_agent = MagicMock()
+        mock_report_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "report": "# Report",
+        })
+
+        orchestrator = MagicMock()
+        orchestrator.get_agent = MagicMock(return_value=mock_report_agent)
+
+        mock_settings = MagicMock()
+        mock_settings.max_repeats = 5
+
+        with patch("builtins.input", side_effect=["research test topic", "quit"]):
+            with patch("builtins.print"):
+                with patch("research_agents.main.get_settings", return_value=mock_settings):
+                    await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        # Should have called exactly once since validation succeeded
+        assert research_agent.execute.call_count == 1
+        assert validation_agent.validate_findings.call_count == 1
+
     async def test_validate_command(self, mock_agents):
         """Test validate command validates pending findings."""
         main_agent, research_agent, validation_agent, orchestrator = mock_agents

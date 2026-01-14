@@ -6,6 +6,7 @@ from .agents.main_agent import MainAgent
 from .agents.report_agent import ReportAgent
 from .agents.research_agent import ResearchAgent
 from .agents.validation_agent import ValidationAgent
+from .core.config import get_settings
 from .core.database import get_database
 from .core.orchestrator import Orchestrator
 
@@ -123,45 +124,68 @@ async def chat_loop(
             if user_input.lower() == "research" or user_input.lower().startswith("research "):
                 query = user_input[8:].strip() if len(user_input) > 8 else ""
                 if query:
-                    # Step 1: Research
-                    print(f"Researching: {query}...")
-                    result = await research_agent.execute(query)
-                    if result.get("status") != "completed":
-                        print(f"Research failed: {result.get('error', 'Unknown error')}")
-                        print()
-                        continue
+                    settings = get_settings()
+                    max_repeats = settings.max_repeats
+                    all_validated = []
+                    attempt = 0
 
-                    findings = result.get("findings", [])
-                    main_agent.current_query = query
-                    print(f"Found {len(findings)} results.")
+                    while attempt <= max_repeats:
+                        attempt += 1
+                        attempt_label = f" (attempt {attempt}/{max_repeats + 1})" if attempt > 1 else ""
 
-                    if not findings:
-                        print("No results found.")
-                        print()
-                        continue
+                        # Step 1: Research
+                        print(f"Researching: {query}...{attempt_label}")
+                        result = await research_agent.execute(query)
+                        if result.get("status") != "completed":
+                            print(f"Research failed: {result.get('error', 'Unknown error')}")
+                            if attempt <= max_repeats:
+                                print("Retrying...")
+                                continue
+                            print()
+                            break
 
-                    # Step 2: Validate
-                    print(f"Validating {len(findings)} findings...")
-                    validation_result = await validation_agent.validate_findings(findings)
-                    validated = validation_result.get("validated", [])
-                    removed = validation_result.get("removed", [])
-                    stats = validation_result.get("stats", {})
+                        findings = result.get("findings", [])
+                        main_agent.current_query = query
+                        print(f"Found {len(findings)} results.")
 
-                    # Update main agent state
-                    main_agent.validated_findings.extend(validated)
-                    if validated:
+                        if not findings:
+                            if attempt <= max_repeats:
+                                print("No results found. Retrying...")
+                                continue
+                            print("No results found.")
+                            print()
+                            break
+
+                        # Step 2: Validate
+                        print(f"Validating {len(findings)} findings...")
+                        validation_result = await validation_agent.validate_findings(findings)
+                        validated = validation_result.get("validated", [])
+                        removed = validation_result.get("removed", [])
+                        stats = validation_result.get("stats", {})
+
+                        print(f"Validation: {len(validated)} verified, {len(removed)} removed ({stats.get('validation_rate', 0):.0%} rate)")
+
+                        if validated:
+                            all_validated.extend(validated)
+                            # We have validated results, exit retry loop
+                            break
+                        elif attempt <= max_repeats:
+                            print(f"No findings could be verified. Retrying ({attempt}/{max_repeats + 1})...")
+                        else:
+                            print("No findings could be verified after all attempts.")
+
+                    # Update main agent state with all validated findings
+                    if all_validated:
+                        main_agent.validated_findings.extend(all_validated)
                         main_agent.research_cache.append({
                             "source": "Validated Research",
                             "content": "\n".join(
                                 f"- {f.get('title', 'Untitled')}: {f.get('snippet', '')}"
-                                for f in validated
+                                for f in all_validated
                             ),
                         })
 
-                    print(f"Validation: {len(validated)} verified, {len(removed)} removed ({stats.get('validation_rate', 0):.0%} rate)")
-
-                    if not validated:
-                        print("No findings could be verified.")
+                    if not all_validated:
                         print()
                         continue
 
@@ -189,7 +213,7 @@ async def chat_loop(
                         print("\n" + "=" * 50)
                         print(f"Research Results: {query}")
                         print("=" * 50)
-                        for f in validated:
+                        for f in all_validated:
                             conf = f.get("validation", {}).get("confidence", 0)
                             print(f"\n[{conf:.0%}] {f.get('title', 'Untitled')}")
                             print(f"    {f.get('snippet', '')[:200]}")

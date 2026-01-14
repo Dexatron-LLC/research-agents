@@ -67,6 +67,12 @@ uv run research-agents
    ANTHROPIC_API_KEY=your-api-key-here
    ```
 
+3. Optionally configure retry behavior:
+   ```
+   MAXREPEATS=3
+   ```
+   This controls how many times the research command will retry when validation fails (default: 3).
+
 ## Usage
 
 Once running, you can interact with the research assistant through the chat interface:
@@ -85,6 +91,8 @@ Generating report...
 [Generated report with validated findings]
 ==================================================
 ```
+
+If validation fails (no findings can be verified), the system will automatically retry up to `MAXREPEATS` times (default: 3).
 
 ### Available Commands
 

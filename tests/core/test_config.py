@@ -27,6 +27,7 @@ class TestSettings:
         assert settings.request_timeout == 60.0
         assert settings.reports_dir == Path("reports")
         assert settings.database_path == Path("data/research_agents.db")
+        assert settings.max_repeats == 3
 
     def test_api_key_property(self, mock_settings: Settings):
         """Test api_key property alias."""
@@ -62,6 +63,16 @@ class TestSettings:
         assert settings.anthropic_base_url == "https://custom.api.com"
         assert settings.default_model == "custom-model"
         assert settings.max_tokens == 4096
+
+    def test_max_repeats_from_environment(self):
+        """Test loading MAXREPEATS from environment variable."""
+        env_vars = {
+            "MAXREPEATS": "5",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            settings = Settings(_env_file=None)
+
+        assert settings.max_repeats == 5
 
 
 class TestGetSettings:
