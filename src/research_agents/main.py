@@ -21,6 +21,8 @@ async def chat_loop(
     print("=" * 40)
     print(f"Session ID: {main_agent.session_id}")
     print("Commands:")
+    print("  research <query> - Search for information on a topic")
+    print("  validate   - Validate pending research findings")
     print("  quit/exit  - End the session")
     print("  clear      - Clear conversation history")
     print("  cache      - Show cached research count")
@@ -116,6 +118,65 @@ async def chat_loop(
                         print("No reports in database yet.")
                 except Exception as e:
                     print(f"Database unavailable: {e}")
+                print()
+                continue
+
+            if user_input.lower() == "research" or user_input.lower().startswith("research "):
+                query = user_input[8:].strip() if len(user_input) > 8 else ""
+                if query:
+                    print(f"Researching: {query}...")
+                    result = await research_agent.execute(query)
+                    if result.get("status") == "completed":
+                        findings = result.get("findings", [])
+                        main_agent.pending_validation.extend(findings)
+                        main_agent.current_query = query
+                        print(f"Found {len(findings)} results:")
+                        for f in findings[:5]:
+                            print(f"  - {f.get('title', 'Untitled')}")
+                        if len(findings) > 5:
+                            print(f"  ... and {len(findings) - 5} more")
+                        print("\nUse 'validate' to fact-check these findings.")
+                    else:
+                        print(f"Research failed: {result.get('error', 'Unknown error')}")
+                else:
+                    print("Please provide a search query. Usage: research <query>")
+                print()
+                continue
+
+            if user_input.lower() == "validate":
+                if not main_agent.pending_validation:
+                    print("No pending findings to validate. Use 'research <query>' first.")
+                else:
+                    print(f"Validating {len(main_agent.pending_validation)} findings...")
+                    result = await validation_agent.validate_findings(main_agent.pending_validation)
+                    validated = result.get("validated", [])
+                    removed = result.get("removed", [])
+                    stats = result.get("stats", {})
+
+                    # Update main agent state
+                    main_agent.validated_findings.extend(validated)
+                    if validated:
+                        main_agent.research_cache.append({
+                            "source": "Validated Research",
+                            "content": "\n".join(
+                                f"- {f.get('title', 'Untitled')}: {f.get('snippet', '')}"
+                                for f in validated
+                            ),
+                        })
+                    main_agent.pending_validation.clear()
+
+                    print(f"Validation complete:")
+                    print(f"  Verified: {len(validated)} findings")
+                    print(f"  Removed:  {len(removed)} findings")
+                    print(f"  Rate:     {stats.get('validation_rate', 0):.0%}")
+
+                    if validated:
+                        print("\nVerified findings:")
+                        for f in validated[:3]:
+                            conf = f.get("validation", {}).get("confidence", 0)
+                            print(f"  [{conf:.0%}] {f.get('title', 'Untitled')[:50]}")
+                        if len(validated) > 3:
+                            print(f"  ... and {len(validated) - 3} more")
                 print()
                 continue
 

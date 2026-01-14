@@ -36,6 +36,8 @@ class TestChatLoopStartup:
 
         # Verify all commands are documented
         expected_commands = [
+            "research",
+            "validate",
             "quit",
             "exit",
             "clear",
@@ -297,6 +299,90 @@ class TestChatLoopCommands:
 
         # chat should not be called for empty inputs
         main_agent.chat.assert_not_called()
+
+    async def test_research_command(self):
+        """Test research command executes research."""
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session-123"
+        main_agent.pending_validation = []  # Real list
+        main_agent.current_query = ""
+
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        research_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "findings": [
+                {"title": "Finding 1", "snippet": "Content 1"},
+                {"title": "Finding 2", "snippet": "Content 2"},
+            ],
+        })
+
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+
+        orchestrator = MagicMock()
+
+        outputs = []
+        with patch("builtins.input", side_effect=["research climate change", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        research_agent.execute.assert_called_once_with("climate change")
+        assert len(main_agent.pending_validation) == 2
+        assert any("Found 2 results" in out for out in outputs)
+
+    async def test_research_command_no_query(self):
+        """Test research command with no query shows usage."""
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session-123"
+
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+
+        orchestrator = MagicMock()
+
+        outputs = []
+        with patch("builtins.input", side_effect=["research", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        assert any("Usage" in out for out in outputs)
+
+    async def test_validate_command(self, mock_agents):
+        """Test validate command validates pending findings."""
+        main_agent, research_agent, validation_agent, orchestrator = mock_agents
+        main_agent.pending_validation = [
+            {"title": "Finding 1", "snippet": "Content 1"},
+        ]
+        validation_agent.validate_findings = AsyncMock(return_value={
+            "validated": [{"title": "Finding 1", "validation": {"confidence": 0.9}}],
+            "removed": [],
+            "stats": {"validation_rate": 1.0},
+        })
+
+        outputs = []
+        with patch("builtins.input", side_effect=["validate", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        validation_agent.validate_findings.assert_called_once()
+        assert len(main_agent.pending_validation) == 0
+        assert any("Validation complete" in out for out in outputs)
+
+    async def test_validate_command_no_pending(self, mock_agents):
+        """Test validate command with no pending findings."""
+        main_agent, research_agent, validation_agent, orchestrator = mock_agents
+        main_agent.pending_validation = []
+
+        outputs = []
+        with patch("builtins.input", side_effect=["validate", "quit"]):
+            with patch("builtins.print", side_effect=lambda x="", **kwargs: outputs.append(str(x))):
+                await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        assert any("No pending findings" in out for out in outputs)
 
     async def test_regular_message_calls_chat(self, mock_agents):
         """Test regular message calls the chat method."""
