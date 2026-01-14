@@ -9,6 +9,72 @@ import pytest
 from research_agents.main import chat_loop, main, run
 
 
+class TestChatLoopStartup:
+    """Test chat loop startup and command display."""
+
+    async def test_displays_command_list(self):
+        """Test that chat loop displays all available commands on startup."""
+        from research_agents.main import chat_loop
+
+        main_agent = MagicMock()
+        main_agent.session_id = "test-session"
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+        orchestrator = MagicMock()
+
+        outputs = []
+        with patch("builtins.input", side_effect=["quit"]):
+            with patch("builtins.print", side_effect=lambda x="": outputs.append(str(x))):
+                with patch("research_agents.main.get_database") as mock_db:
+                    mock_db.return_value.end_session = AsyncMock()
+                    mock_db.return_value.close = AsyncMock()
+                    await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        output_text = "\n".join(outputs)
+
+        # Verify all commands are documented
+        expected_commands = [
+            "quit",
+            "exit",
+            "clear",
+            "cache",
+            "clearcache",
+            "status",
+            "agents",
+            "history",
+            "dbstats",
+            "dbreports",
+        ]
+
+        for cmd in expected_commands:
+            assert cmd in output_text, f"Command '{cmd}' not found in startup output"
+
+    async def test_displays_session_id(self):
+        """Test that chat loop displays the session ID."""
+        from research_agents.main import chat_loop
+
+        main_agent = MagicMock()
+        main_agent.session_id = "unique-session-12345"
+        research_agent = MagicMock()
+        research_agent.close = AsyncMock()
+        validation_agent = MagicMock()
+        validation_agent.close = AsyncMock()
+        orchestrator = MagicMock()
+
+        outputs = []
+        with patch("builtins.input", side_effect=["quit"]):
+            with patch("builtins.print", side_effect=lambda x="": outputs.append(str(x))):
+                with patch("research_agents.main.get_database") as mock_db:
+                    mock_db.return_value.end_session = AsyncMock()
+                    mock_db.return_value.close = AsyncMock()
+                    await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
+
+        output_text = "\n".join(outputs)
+        assert "unique-session-12345" in output_text
+
+
 class TestChatLoopCommands:
     """Test chat loop command handling."""
 
