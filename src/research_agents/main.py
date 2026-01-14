@@ -21,8 +21,7 @@ async def chat_loop(
     print("=" * 40)
     print(f"Session ID: {main_agent.session_id}")
     print("Commands:")
-    print("  research <query> - Search for information on a topic")
-    print("  validate   - Validate pending research findings")
+    print("  research <query> - Search, validate, and generate report")
     print("  quit/exit  - End the session")
     print("  clear      - Clear conversation history")
     print("  cache      - Show cached research count")
@@ -124,20 +123,77 @@ async def chat_loop(
             if user_input.lower() == "research" or user_input.lower().startswith("research "):
                 query = user_input[8:].strip() if len(user_input) > 8 else ""
                 if query:
+                    # Step 1: Research
                     print(f"Researching: {query}...")
                     result = await research_agent.execute(query)
-                    if result.get("status") == "completed":
-                        findings = result.get("findings", [])
-                        main_agent.pending_validation.extend(findings)
-                        main_agent.current_query = query
-                        print(f"Found {len(findings)} results:")
-                        for f in findings[:5]:
-                            print(f"  - {f.get('title', 'Untitled')}")
-                        if len(findings) > 5:
-                            print(f"  ... and {len(findings) - 5} more")
-                        print("\nUse 'validate' to fact-check these findings.")
-                    else:
+                    if result.get("status") != "completed":
                         print(f"Research failed: {result.get('error', 'Unknown error')}")
+                        print()
+                        continue
+
+                    findings = result.get("findings", [])
+                    main_agent.current_query = query
+                    print(f"Found {len(findings)} results.")
+
+                    if not findings:
+                        print("No results found.")
+                        print()
+                        continue
+
+                    # Step 2: Validate
+                    print(f"Validating {len(findings)} findings...")
+                    validation_result = await validation_agent.validate_findings(findings)
+                    validated = validation_result.get("validated", [])
+                    removed = validation_result.get("removed", [])
+                    stats = validation_result.get("stats", {})
+
+                    # Update main agent state
+                    main_agent.validated_findings.extend(validated)
+                    if validated:
+                        main_agent.research_cache.append({
+                            "source": "Validated Research",
+                            "content": "\n".join(
+                                f"- {f.get('title', 'Untitled')}: {f.get('snippet', '')}"
+                                for f in validated
+                            ),
+                        })
+
+                    print(f"Validation: {len(validated)} verified, {len(removed)} removed ({stats.get('validation_rate', 0):.0%} rate)")
+
+                    if not validated:
+                        print("No findings could be verified.")
+                        print()
+                        continue
+
+                    # Step 3: Generate Report
+                    print("Generating report...")
+                    report_agent = orchestrator.get_agent("report")
+                    if report_agent:
+                        report_title = f"Research Report: {query}"
+                        report_context = {
+                            "title": report_title,
+                            "information": main_agent.research_cache,
+                            "instructions": "Focus on the validated findings and their confidence levels.",
+                        }
+                        report_result = await report_agent.execute(report_title, report_context)
+
+                        if report_result.get("status") == "completed":
+                            report_content = report_result.get("report", "")
+                            print("\n" + "=" * 50)
+                            print(report_content)
+                            print("=" * 50)
+                        else:
+                            print("Report generation failed.")
+                    else:
+                        # No report agent, just display validated findings
+                        print("\n" + "=" * 50)
+                        print(f"Research Results: {query}")
+                        print("=" * 50)
+                        for f in validated:
+                            conf = f.get("validation", {}).get("confidence", 0)
+                            print(f"\n[{conf:.0%}] {f.get('title', 'Untitled')}")
+                            print(f"    {f.get('snippet', '')[:200]}")
+                        print("=" * 50)
                 else:
                     print("Please provide a search query. Usage: research <query>")
                 print()

@@ -72,19 +72,26 @@ uv run research-agents
 Once running, you can interact with the research assistant through the chat interface:
 
 ```
-You: Search for information about renewable energy
-Assistant: [Performs research and returns findings]
+You: research renewable energy
+Researching: renewable energy...
+Found 10 results.
+Validating 10 findings...
+Validation: 7 verified, 3 removed (70% rate)
+Generating report...
 
-You: Validate the findings
-Assistant: [Validates findings against trusted sources and auto-generates a report]
+==================================================
+# Research Report: renewable energy
+
+[Generated report with validated findings]
+==================================================
 ```
 
 ### Available Commands
 
 | Command | Description |
 |---------|-------------|
-| `research <query>` | Search for information on a topic |
-| `validate` | Validate pending research findings |
+| `research <query>` | Search, validate, and generate report automatically |
+| `validate` | Manually validate pending research findings |
 | `quit` / `exit` | Exit the application |
 | `clear` | Clear the conversation history |
 | `cache` | Display research cache count |

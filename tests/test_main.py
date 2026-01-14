@@ -37,7 +37,6 @@ class TestChatLoopStartup:
         # Verify all commands are documented
         expected_commands = [
             "research",
-            "validate",
             "quit",
             "exit",
             "clear",
@@ -301,10 +300,11 @@ class TestChatLoopCommands:
         main_agent.chat.assert_not_called()
 
     async def test_research_command(self):
-        """Test research command executes research."""
+        """Test research command executes full workflow: research, validate, report."""
         main_agent = MagicMock()
         main_agent.session_id = "test-session-123"
-        main_agent.pending_validation = []  # Real list
+        main_agent.validated_findings = []  # Real list
+        main_agent.research_cache = []  # Real list
         main_agent.current_query = ""
 
         research_agent = MagicMock()
@@ -319,8 +319,22 @@ class TestChatLoopCommands:
 
         validation_agent = MagicMock()
         validation_agent.close = AsyncMock()
+        validation_agent.validate_findings = AsyncMock(return_value={
+            "validated": [
+                {"title": "Finding 1", "snippet": "Content 1", "validation": {"confidence": 0.9}},
+            ],
+            "removed": [{"title": "Finding 2"}],
+            "stats": {"validation_rate": 0.5},
+        })
+
+        mock_report_agent = MagicMock()
+        mock_report_agent.execute = AsyncMock(return_value={
+            "status": "completed",
+            "report": "# Research Report\n\nFindings about climate change.",
+        })
 
         orchestrator = MagicMock()
+        orchestrator.get_agent = MagicMock(return_value=mock_report_agent)
 
         outputs = []
         with patch("builtins.input", side_effect=["research climate change", "quit"]):
@@ -328,8 +342,12 @@ class TestChatLoopCommands:
                 await chat_loop(main_agent, research_agent, validation_agent, orchestrator)
 
         research_agent.execute.assert_called_once_with("climate change")
-        assert len(main_agent.pending_validation) == 2
-        assert any("Found 2 results" in out for out in outputs)
+        validation_agent.validate_findings.assert_called_once()
+        mock_report_agent.execute.assert_called_once()
+        output_text = "\n".join(outputs)
+        assert "Found 2 results" in output_text
+        assert "Validating" in output_text
+        assert "Research Report" in output_text
 
     async def test_research_command_no_query(self):
         """Test research command with no query shows usage."""
