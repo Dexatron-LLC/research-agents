@@ -71,6 +71,16 @@ def mock_search_tool(mocker) -> MagicMock:
         ),
     ]
 
+    async def mock_fetch_page(url: str, max_content_length: int = 10000):
+        return {
+            "url": url,
+            "title": "Mock Page Title",
+            "content": "This is mock page content for testing purposes.",
+            "html": "<html><body>Mock HTML</body></html>",
+        }
+
+    mock_tool.fetch_page = mock_fetch_page
+
     async def mock_close():
         pass
 
@@ -127,8 +137,25 @@ async def full_agent_system(
     )
 
     # Create agents
-    research_agent = ResearchAgent()
+    research_agent = ResearchAgent(settings=integration_settings)
     research_agent.search_tool = mock_search_tool
+
+    # Mock the research agent's LLM-dependent methods for integration tests
+    async def mock_generate_queries(topic: str):
+        return [topic]  # Just return the original topic
+
+    async def mock_analyze_content(url: str, title: str, content: str, topic: str):
+        return {
+            "url": url,
+            "title": title,
+            "findings": [f"Finding about {topic} from {title}"],
+            "statistics": [],
+            "credibility": "medium",
+            "summary": f"Summary of {topic}",
+        }
+
+    research_agent._generate_search_queries = mock_generate_queries
+    research_agent._analyze_content = mock_analyze_content
 
     validation_agent = ValidationAgent(integration_settings)
     validation_agent.search_tool = mock_search_tool
