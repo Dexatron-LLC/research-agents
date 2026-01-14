@@ -31,6 +31,8 @@ class MainAgent(BaseAgent):
         self.validated_findings: list[dict[str, Any]] = []
         self.pending_validation: list[dict[str, Any]] = []
         self.current_query: str = ""
+        self.current_report: str | None = None
+        self.current_report_title: str | None = None
         self._db_initialized = False
 
     async def _ensure_db_initialized(self) -> None:
@@ -47,6 +49,26 @@ class MainAgent(BaseAgent):
             print(f"Warning: Database unavailable ({e}). Running without persistence.")
             self._db_initialized = True  # Don't retry
 
+    def _get_current_state_info(self) -> str:
+        """Get current state information for the system prompt."""
+        parts = []
+
+        if self.current_report:
+            parts.append(f"- REPORT AVAILABLE: '{self.current_report_title}' (ready to save)")
+        else:
+            parts.append("- No report currently available")
+
+        if self.pending_validation:
+            parts.append(f"- Pending validation: {len(self.pending_validation)} findings")
+
+        if self.validated_findings:
+            parts.append(f"- Validated findings: {len(self.validated_findings)}")
+
+        if self.research_cache:
+            parts.append(f"- Research cache: {len(self.research_cache)} items")
+
+        return "\n".join(parts) if parts else "No active research session"
+
     def _get_coordinator_system_prompt(self) -> str:
         """Build system prompt combining YAML definition with available agents and tools."""
         # Get base prompt from YAML definition
@@ -61,9 +83,15 @@ class MainAgent(BaseAgent):
 
         agents_list = "\n".join(agents_info) if agents_info else "No sub-agents available"
 
+        # Build current state info
+        state_info = self._get_current_state_info()
+
         tool_instructions = f"""
 ## Available Agents
 {agents_list}
+
+## Current State
+{state_info}
 
 ## Tool Usage
 To use an agent, respond with a JSON tool call. Available tool calls:
@@ -77,7 +105,7 @@ To use an agent, respond with a JSON tool call. Available tool calls:
 3. Create a report from validated research:
 {{"tool": "report", "action": "create", "title": "Report Title", "instructions": "optional formatting instructions"}}
 
-4. Save the current report:
+4. Save the current report (ONLY use when a report exists - check Current State above):
 {{"tool": "report", "action": "save", "filename": "optional_filename"}}
 
 5. List saved reports:
@@ -91,7 +119,11 @@ To use an agent, respond with a JSON tool call. Available tool calls:
 2. After research, validate the findings using the validation tool to fact-check against trusted sources.
 3. The validation agent will remove unverifiable claims and may request replacement research.
 4. A report is AUTOMATICALLY created after successful validation - no need to call the report tool manually.
-5. For general conversation, respond normally without tool calls.
+5. When user asks to save the report and a report exists (see Current State), use the save tool immediately.
+6. For general conversation, respond normally without tool calls.
+
+IMPORTANT: When the user asks to "save this report" or "save the report" and Current State shows a report exists,
+you MUST respond with the save tool call: {{"tool": "report", "action": "save"}}
 
 Always validate research before creating reports to ensure accuracy. All data is stored in the database for persistence."""
 
@@ -249,9 +281,13 @@ Always validate research before creating reports to ensure accuracy. All data is
         result = await report_agent.execute(title, context)
 
         if result.get("status") == "completed":
+            # Store report in main agent's state for later saving
+            report_content = result.get("report", "")
+            self.current_report = report_content
+            self.current_report_title = title
+
             # Save report to database
             try:
-                report_content = result.get("report", "")
                 await self.db.save_report(
                     session_id=self.session_id,
                     title=title,
@@ -346,8 +382,23 @@ Always validate research before creating reports to ensure accuracy. All data is
                 return await agent.execute(tool_call.get("title", "Research Report"), context)
 
             elif action == "save":
+                # Ensure report agent has the current report
+                if self.current_report and not agent.current_report:
+                    agent.current_report = self.current_report
+                    agent.current_title = self.current_report_title
+
+                if not agent.current_report and not self.current_report:
+                    return {"error": "No report available to save. Please generate a report first."}
+
                 context = {"save": True, "filename": tool_call.get("filename")}
-                return await agent.execute("save", context)
+                result = await agent.execute("save", context)
+
+                # Clear the current report after saving
+                if result.get("status") == "saved":
+                    self.current_report = None
+                    self.current_report_title = None
+
+                return result
 
             elif action == "list":
                 context = {"list": True}
@@ -541,6 +592,8 @@ Always validate research before creating reports to ensure accuracy. All data is
         self.research_cache.clear()
         self.validated_findings.clear()
         self.pending_validation.clear()
+        self.current_report = None
+        self.current_report_title = None
 
     def get_validation_status(self) -> dict[str, Any]:
         """Get current validation status."""
@@ -548,6 +601,8 @@ Always validate research before creating reports to ensure accuracy. All data is
             "pending_validation": len(self.pending_validation),
             "validated_findings": len(self.validated_findings),
             "research_cache_items": len(self.research_cache),
+            "has_report": self.current_report is not None,
+            "report_title": self.current_report_title,
         }
 
     async def chat(self, message: str) -> str:
