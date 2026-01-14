@@ -1,6 +1,43 @@
 """Main entry point for the research agents system."""
 
 import asyncio
+import sys
+import warnings
+
+# Suppress RuntimeError from asyncio subprocess cleanup at exit
+# This is a known issue with Playwright's subprocess cleanup
+warnings.filterwarnings(
+    "ignore",
+    message="Event loop is closed",
+    category=RuntimeWarning,
+)
+
+# Store original hooks for non-suppressed exceptions
+_original_excepthook = sys.excepthook
+_original_unraisablehook = getattr(sys, "unraisablehook", None)
+
+
+def _suppress_event_loop_errors(exc_type, exc_value, exc_tb):
+    """Suppress 'Event loop is closed' errors during shutdown."""
+    if exc_type is RuntimeError and "Event loop is closed" in str(exc_value):
+        return  # Suppress
+    _original_excepthook(exc_type, exc_value, exc_tb)
+
+
+def _suppress_unraisable_errors(unraisable):
+    """Suppress 'Event loop is closed' errors from __del__ methods."""
+    if unraisable.exc_type is RuntimeError and "Event loop is closed" in str(unraisable.exc_value):
+        return  # Suppress
+    if _original_unraisablehook:
+        _original_unraisablehook(unraisable)
+    else:
+        # Default behavior: print to stderr
+        print(f"Exception ignored in: {unraisable.object}", file=sys.stderr)
+        sys.__excepthook__(unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)
+
+
+sys.excepthook = _suppress_event_loop_errors
+sys.unraisablehook = _suppress_unraisable_errors
 
 from .agents.main_agent import MainAgent
 from .agents.report_agent import ReportAgent
@@ -396,13 +433,28 @@ async def chat_loop(
     except KeyboardInterrupt:
         print("\nGoodbye!")
     finally:
-        await research_agent.close()
-        await validation_agent.close()
+        # Close agents gracefully
+        try:
+            await research_agent.close()
+        except Exception:
+            pass
+
+        try:
+            await validation_agent.close()
+        except Exception:
+            pass
+
         # Close database connection
         try:
             db = get_database()
             await db.end_session(main_agent.session_id)
             await db.close()
+        except Exception:
+            pass
+
+        # Give async tasks time to complete cleanup
+        try:
+            await asyncio.sleep(0.1)
         except Exception:
             pass
 
@@ -431,7 +483,36 @@ async def main() -> None:
 
 def run() -> None:
     """Entry point for the CLI."""
-    asyncio.run(main())
+    # Use a custom exception handler to suppress event loop closed errors
+    # that occur during subprocess cleanup
+    def exception_handler(loop, context):
+        exception = context.get("exception")
+        if isinstance(exception, RuntimeError) and "Event loop is closed" in str(exception):
+            return  # Suppress this specific error
+        # For other exceptions, use default handling
+        loop.default_exception_handler(context)
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.set_exception_handler(exception_handler)
+        loop.run_until_complete(main())
+    finally:
+        try:
+            # Cancel any remaining tasks
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            # Give tasks a chance to clean up
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

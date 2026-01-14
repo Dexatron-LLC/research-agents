@@ -35,14 +35,31 @@ class WebSearchTool:
         return self._page
 
     async def close(self) -> None:
-        """Clean up browser resources."""
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-        self._page = None
+        """Clean up browser resources gracefully."""
+        try:
+            if self._page and not self._page.is_closed():
+                try:
+                    await self._page.close()
+                except Exception:
+                    pass
+            self._page = None
+
+            if self._browser:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
+
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
+        except Exception:
+            # Suppress any errors during cleanup
+            pass
 
     def search(self, query: str, num_results: int = 10) -> list[SearchResult]:
         """Perform a web search using DuckDuckGo.
