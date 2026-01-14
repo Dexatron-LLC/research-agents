@@ -117,6 +117,77 @@ class TestWebSearchToolSearch:
         assert results[1].url == "https://only-url.com"
 
 
+class TestWebSearchToolGetPage:
+    """Tests for the _get_page method."""
+
+    async def test_get_page_creates_browser(self, mock_ddgs, mocker):
+        """Test that _get_page creates browser when none exists."""
+        tool = WebSearchTool()
+
+        mock_page = MagicMock()
+        mock_browser = AsyncMock()
+        mock_browser.new_page = AsyncMock(return_value=mock_page)
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+        mock_async_playwright_cm = MagicMock()
+        mock_async_playwright_cm.start = AsyncMock(return_value=mock_playwright)
+
+        mocker.patch(
+            "research_agents.tools.web_search.async_playwright",
+            return_value=mock_async_playwright_cm,
+        )
+
+        result = await tool._get_page()
+
+        assert result is mock_page
+        mock_playwright.chromium.launch.assert_called_once_with(headless=True)
+        mock_browser.new_page.assert_called_once()
+
+    async def test_get_page_reuses_existing(self, mock_ddgs, mocker):
+        """Test that _get_page reuses existing page when not closed."""
+        tool = WebSearchTool()
+
+        mock_page = MagicMock()
+        mock_page.is_closed = MagicMock(return_value=False)
+        tool._page = mock_page
+
+        # Should not need to call async_playwright since page exists
+        result = await tool._get_page()
+
+        assert result is mock_page
+
+    async def test_get_page_creates_new_if_closed(self, mock_ddgs, mocker):
+        """Test that _get_page creates new page if current is closed."""
+        tool = WebSearchTool()
+
+        # Set up closed page
+        closed_page = MagicMock()
+        closed_page.is_closed = MagicMock(return_value=True)
+        tool._page = closed_page
+
+        # Set up mock for new page creation
+        new_page = MagicMock()
+        mock_browser = AsyncMock()
+        mock_browser.new_page = AsyncMock(return_value=new_page)
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+        mock_async_playwright_cm = MagicMock()
+        mock_async_playwright_cm.start = AsyncMock(return_value=mock_playwright)
+
+        mocker.patch(
+            "research_agents.tools.web_search.async_playwright",
+            return_value=mock_async_playwright_cm,
+        )
+
+        result = await tool._get_page()
+
+        assert result is new_page
+
+
 class TestWebSearchToolBrowser:
     """Tests for browser-related functionality."""
 

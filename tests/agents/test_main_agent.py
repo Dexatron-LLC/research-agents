@@ -345,3 +345,392 @@ class TestMainAgentChat:
         response = await agent.chat("Search for AI")
 
         assert "research results" in response.lower() or len(response) > 0
+
+
+class TestMainAgentDatabaseInitialization:
+    """Tests for database initialization."""
+
+    async def test_ensure_db_initialized_success(self, temp_dir: Path):
+        """Test successful database initialization."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+        mock_db.initialize_schema = AsyncMock()
+        mock_db.create_session = AsyncMock()
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        await agent._ensure_db_initialized()
+
+        assert agent._db_initialized is True
+        mock_db.connect.assert_called_once()
+
+    async def test_ensure_db_initialized_skips_if_done(self, temp_dir: Path):
+        """Test that initialization is skipped if already done."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        agent._db_initialized = True
+
+        await agent._ensure_db_initialized()
+
+        mock_db.connect.assert_not_called()
+
+    async def test_ensure_db_initialized_handles_error(self, temp_dir: Path, capsys):
+        """Test database initialization error handling."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock(side_effect=Exception("Connection failed"))
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        await agent._ensure_db_initialized()
+
+        assert agent._db_initialized is True  # Still set to prevent retries
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out
+
+
+class TestMainAgentValidationHandling:
+    """Tests for validation workflow."""
+
+    @pytest.fixture
+    def configured_agent_with_validation(self, temp_dir: Path) -> tuple[MainAgent, Orchestrator]:
+        """Create agent with validation agent configured."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(
+            anthropic_api_key="test-key",
+            database_path=temp_dir / "test.db",
+        )
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+        mock_db.initialize_schema = AsyncMock()
+        mock_db.create_session = AsyncMock()
+        mock_db.save_message = AsyncMock()
+        mock_db.save_finding = AsyncMock(return_value=1)
+        mock_db.save_validation = AsyncMock()
+        mock_db.save_report = AsyncMock()
+        mock_db.get_findings_by_session = AsyncMock(return_value=[
+            {"id": 1, "title": "Finding 1"},
+            {"id": 2, "title": "Finding 2"},
+        ])
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        return agent, orchestrator
+
+    async def test_handle_validation_no_agent(self, configured_agent_with_validation):
+        """Test validation when validation agent is not available."""
+        agent, orchestrator = configured_agent_with_validation
+        agent.pending_validation = [{"title": "Test"}]
+
+        result = await agent._handle_validation()
+
+        assert "error" in result
+        assert "not available" in result["error"]
+
+    async def test_handle_validation_success(self, configured_agent_with_validation):
+        """Test successful validation."""
+        agent, orchestrator = configured_agent_with_validation
+        agent.pending_validation = [
+            {"title": "Finding 1", "snippet": "Content 1"},
+            {"title": "Finding 2", "snippet": "Content 2"},
+        ]
+
+        mock_validation = MagicMock()
+        mock_validation.name = "validation"
+        mock_validation.description = "Validation agent"
+        mock_validation.execute = AsyncMock(return_value={
+            "status": "completed",
+            "validated": [
+                {"title": "Finding 1", "validation": {"status": "VERIFIED", "confidence": 0.9}},
+            ],
+            "removed": [
+                {"title": "Finding 2", "validation": {"status": "UNVERIFIED", "confidence": 0.2}},
+            ],
+            "stats": {"validated_count": 1, "removed_count": 1, "validation_rate": 0.5},
+        })
+        orchestrator.register_agent(mock_validation)
+
+        # Mock report agent for auto-report
+        mock_report = MagicMock()
+        mock_report.name = "report"
+        mock_report.execute = AsyncMock(return_value={"status": "completed", "report": "# Report"})
+        orchestrator.register_agent(mock_report)
+
+        result = await agent._handle_validation()
+
+        assert result["status"] == "completed"
+        assert len(result["validated"]) == 1
+        assert len(result["removed"]) == 1
+        assert len(agent.pending_validation) == 0
+
+    async def test_handle_validation_unknown_action(self, configured_agent_with_validation):
+        """Test validation with unknown action."""
+        agent, orchestrator = configured_agent_with_validation
+
+        mock_validation = MagicMock()
+        mock_validation.name = "validation"
+        orchestrator.register_agent(mock_validation)
+
+        tool_call = {"tool": "validation", "action": "unknown"}
+        result = await agent._handle_tool_call(tool_call)
+
+        assert "error" in result
+        assert "Unknown validation action" in result["error"]
+
+
+class TestMainAgentReportHandling:
+    """Tests for report tool handling."""
+
+    @pytest.fixture
+    def agent_with_report(self, temp_dir: Path) -> tuple[MainAgent, Orchestrator, MagicMock]:
+        """Create agent with report agent configured."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(
+            anthropic_api_key="test-key",
+            database_path=temp_dir / "test.db",
+        )
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+        mock_db.initialize_schema = AsyncMock()
+        mock_db.create_session = AsyncMock()
+        mock_db.save_message = AsyncMock()
+        mock_db.save_report = AsyncMock()
+
+        mock_report = MagicMock()
+        mock_report.name = "report"
+        mock_report.description = "Report agent"
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        orchestrator.register_agent(mock_report)
+
+        return agent, orchestrator, mock_report
+
+    async def test_handle_report_create_needs_validation(self, agent_with_report):
+        """Test report create when findings need validation."""
+        agent, orchestrator, mock_report = agent_with_report
+        agent.pending_validation = [{"title": "Pending"}]
+        agent.research_cache = []
+
+        tool_call = {"tool": "report", "action": "create", "title": "Test"}
+        result = await agent._handle_tool_call(tool_call)
+
+        assert "error" in result
+        assert "validation" in result["error"].lower()
+
+    async def test_handle_report_save(self, agent_with_report):
+        """Test report save action."""
+        agent, orchestrator, mock_report = agent_with_report
+        mock_report.execute = AsyncMock(return_value={
+            "status": "saved",
+            "filepath": "/path/to/report.md",
+        })
+
+        tool_call = {"tool": "report", "action": "save", "filename": "test_report"}
+        result = await agent._handle_tool_call(tool_call)
+
+        mock_report.execute.assert_called_once()
+
+    async def test_handle_report_list(self, agent_with_report):
+        """Test report list action."""
+        agent, orchestrator, mock_report = agent_with_report
+        mock_report.execute = AsyncMock(return_value={
+            "status": "completed",
+            "reports": ["report1.md", "report2.md"],
+        })
+
+        tool_call = {"tool": "report", "action": "list"}
+        result = await agent._handle_tool_call(tool_call)
+
+        mock_report.execute.assert_called_once()
+
+    async def test_handle_report_load(self, agent_with_report):
+        """Test report load action."""
+        agent, orchestrator, mock_report = agent_with_report
+        mock_report.execute = AsyncMock(return_value={
+            "status": "loaded",
+            "report": "# Loaded Report\n\nContent here.",
+        })
+
+        tool_call = {"tool": "report", "action": "load", "filename": "report1"}
+        result = await agent._handle_tool_call(tool_call)
+
+        mock_report.execute.assert_called_once()
+
+    async def test_handle_report_unknown_action(self, agent_with_report):
+        """Test report with unknown action."""
+        agent, orchestrator, mock_report = agent_with_report
+
+        tool_call = {"tool": "report", "action": "unknown_action"}
+        result = await agent._handle_tool_call(tool_call)
+
+        assert "error" in result
+        assert "Unknown report action" in result["error"]
+
+    async def test_handle_report_no_agent(self, temp_dir: Path):
+        """Test report when report agent is not available."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+        agent = MainAgent(orchestrator, settings)
+
+        tool_call = {"tool": "report", "action": "create"}
+        result = await agent._handle_tool_call(tool_call)
+
+        assert "error" in result
+        assert "not available" in result["error"]
+
+
+class TestMainAgentExecuteFlow:
+    """Tests for the execute method flow."""
+
+    @pytest.fixture
+    def agent_with_mocks(self, temp_dir: Path, mock_httpx_client) -> MainAgent:
+        """Create agent with mocked dependencies."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(
+            anthropic_api_key="test-key",
+            database_path=temp_dir / "test.db",
+        )
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+        mock_db.initialize_schema = AsyncMock()
+        mock_db.create_session = AsyncMock()
+        mock_db.save_message = AsyncMock()
+        mock_db.save_finding = AsyncMock(return_value=1)
+        mock_db.save_validation = AsyncMock()
+        mock_db.save_report = AsyncMock()
+        mock_db.get_findings_by_session = AsyncMock(return_value=[])
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        return agent
+
+    async def test_execute_api_error(self, agent_with_mocks, mock_httpx_client):
+        """Test execute handles API errors."""
+        mock_httpx_client.post.return_value.status_code = 500
+        mock_httpx_client.post.return_value.text = "Internal Server Error"
+
+        result = await agent_with_mocks.execute("Hello")
+
+        assert "Error" in result["response"]
+        assert "500" in result["response"]
+
+    async def test_execute_tool_error(self, agent_with_mocks, mock_httpx_client):
+        """Test execute handles tool errors."""
+        mock_httpx_client.post.return_value.json.return_value = {
+            "content": [{"text": '{"tool": "unknown", "query": "test"}'}]
+        }
+
+        result = await agent_with_mocks.execute("Do something")
+
+        assert "error" in result.get("tool_result", {}) or "Error" in result.get("response", "")
+
+
+class TestMainAgentFormatMethods:
+    """Tests for formatting helper methods."""
+
+    def test_format_findings(self, temp_dir: Path):
+        """Test formatting findings for LLM."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+        agent = MainAgent(orchestrator, settings)
+
+        findings = [
+            {"title": "Finding 1", "snippet": "Content 1"},
+            {"title": "Finding 2", "snippet": "Content 2"},
+        ]
+
+        result = agent._format_findings(findings)
+
+        assert "Finding 1" in result
+        assert "Finding 2" in result
+        assert "Content 1" in result
+
+    def test_format_validated_findings(self, temp_dir: Path):
+        """Test formatting validated findings."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+        agent = MainAgent(orchestrator, settings)
+
+        validated = [
+            {
+                "title": "Finding 1",
+                "snippet": "Content",
+                "validation": {
+                    "confidence": 0.9,
+                    "sources": ["https://source1.com", "https://source2.com"],
+                },
+            },
+        ]
+
+        result = agent._format_validated_findings(validated)
+
+        assert "90%" in result
+        assert "Finding 1" in result
+        assert "source1.com" in result
+
+    def test_format_validated_findings_no_sources(self, temp_dir: Path):
+        """Test formatting validated findings without sources."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+        agent = MainAgent(orchestrator, settings)
+
+        validated = [
+            {
+                "title": "Finding 1",
+                "snippet": "Content",
+                "validation": {"confidence": 0.8, "sources": []},
+            },
+        ]
+
+        result = agent._format_validated_findings(validated)
+
+        assert "80%" in result
+        assert "Verified by" not in result
+
+
+class TestMainAgentAutoReport:
+    """Tests for auto-report generation."""
+
+    async def test_auto_create_report_no_agent(self, temp_dir: Path):
+        """Test auto-report when report agent is not available."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+        agent = MainAgent(orchestrator, settings)
+
+        result = await agent._auto_create_report([{"title": "Finding"}])
+
+        assert result is None
+
+    async def test_auto_create_report_success(self, temp_dir: Path):
+        """Test successful auto-report generation."""
+        orchestrator = Orchestrator(use_llm_selection=False)
+        settings = Settings(database_path=temp_dir / "test.db")
+
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.save_report = AsyncMock()
+
+        agent = MainAgent(orchestrator, settings, database=mock_db)
+        agent.current_query = "test query"
+        agent.research_cache = [{"content": "data"}]
+
+        mock_report = MagicMock()
+        mock_report.name = "report"
+        mock_report.execute = AsyncMock(return_value={
+            "status": "completed",
+            "report": "# Report\n\nContent",
+        })
+        orchestrator.register_agent(mock_report)
+
+        result = await agent._auto_create_report([{"title": "Finding"}])
+
+        assert result["status"] == "completed"
+        mock_db.save_report.assert_called_once()

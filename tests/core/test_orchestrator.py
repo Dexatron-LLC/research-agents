@@ -286,6 +286,182 @@ class TestOrchestratorPipeline:
         assert "previous_result" in second_call_context
 
 
+class TestOrchestratorLLMSelection:
+    """Tests for LLM-based agent selection."""
+
+    @pytest.fixture
+    def orchestrator_with_api_key(self, temp_dir):
+        """Create orchestrator with API key configured."""
+        from research_agents.core.config import Settings
+        settings = Settings(
+            anthropic_api_key="test-api-key",
+            database_path=temp_dir / "test.db",
+        )
+        orchestrator = Orchestrator(use_llm_selection=True, settings=settings)
+        orchestrator.register_agent(MockAgent("research", "Research agent"))
+        orchestrator.register_agent(MockAgent("validation", "Validation agent"))
+        return orchestrator
+
+    async def test_llm_select_no_api_key(self, temp_dir):
+        """Test LLM selection returns None without API key."""
+        from research_agents.core.config import Settings
+        settings = Settings(
+            anthropic_api_key="",
+            database_path=temp_dir / "test.db",
+        )
+        orchestrator = Orchestrator(settings=settings)
+        result = await orchestrator._llm_select("Search for AI")
+        assert result is None
+
+    async def test_llm_select_no_selectable_agents(self, temp_dir):
+        """Test LLM selection with no selectable agents."""
+        from research_agents.core.config import Settings
+        settings = Settings(
+            anthropic_api_key="test-key",
+            database_path=temp_dir / "test.db",
+        )
+        orchestrator = Orchestrator(settings=settings)
+        # Only register main agent (which is excluded)
+        orchestrator.register_agent(MockAgent("main", "Main agent"))
+
+        result = await orchestrator._llm_select("Search for AI")
+        assert result is None
+
+    async def test_llm_select_successful(self, orchestrator_with_api_key, mocker):
+        """Test successful LLM agent selection."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": '{"agent": "research", "reason": "Search task"}'}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Search for AI information")
+        assert result == "research"
+
+    async def test_llm_select_invalid_agent(self, orchestrator_with_api_key, mocker):
+        """Test LLM selection with invalid agent name."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": '{"agent": "nonexistent", "reason": "No reason"}'}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Do something")
+        assert result is None
+
+    async def test_llm_select_null_agent(self, orchestrator_with_api_key, mocker):
+        """Test LLM selection returning null agent."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": '{"agent": null, "reason": "No suitable agent"}'}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Random task")
+        assert result is None
+
+    async def test_llm_select_api_error(self, orchestrator_with_api_key, mocker):
+        """Test LLM selection handles API errors."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Search for AI")
+        assert result is None
+
+    async def test_llm_select_invalid_json(self, orchestrator_with_api_key, mocker):
+        """Test LLM selection handles invalid JSON response."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": "Not valid JSON at all"}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Search for AI")
+        assert result is None
+
+    async def test_llm_select_request_error(self, orchestrator_with_api_key, mocker):
+        """Test LLM selection handles request errors."""
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(side_effect=httpx.RequestError("Connection failed"))
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key._llm_select("Search for AI")
+        assert result is None
+
+    async def test_select_agent_uses_llm_when_enabled(self, orchestrator_with_api_key, mocker):
+        """Test select_agent uses LLM selection when enabled."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": '{"agent": "validation", "reason": "Validation needed"}'}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key.select_agent("Check if claim is true")
+        assert result == "validation"
+
+    async def test_select_agent_falls_back_to_keyword(self, orchestrator_with_api_key, mocker):
+        """Test select_agent falls back to keyword matching when LLM fails."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        result = await orchestrator_with_api_key.select_agent("Search for AI information")
+        assert result == "research"  # Falls back to keyword match
+
+
 class TestOrchestratorHistory:
     """Tests for execution history management."""
 

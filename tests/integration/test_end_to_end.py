@@ -320,3 +320,140 @@ class TestErrorHandling:
         result = await main_agent.execute("Do something unknown")
 
         assert "error" in str(result).lower() or "unknown" in str(result).lower()
+
+
+class TestReportOperations:
+    """Test report-related operations."""
+
+    async def test_report_save_flow(
+        self,
+        full_agent_system: dict,
+        mock_llm_responses: MagicMock,
+    ):
+        """Test saving a report."""
+        main_agent = full_agent_system["main_agent"]
+        report_agent = full_agent_system["report_agent"]
+
+        # Set up a current report
+        report_agent.current_report = "# Test Report\n\nContent here."
+        report_agent.current_title = "Test Report"
+
+        mock_llm_responses.post.return_value.json.side_effect = [
+            {"content": [{"text": '{"tool": "report", "action": "save", "filename": "test_save"}'}]},
+            {"content": [{"text": "Report saved successfully!"}]},
+        ]
+
+        result = await main_agent.execute("Save the report")
+
+        assert result is not None
+
+    async def test_report_list_flow(
+        self,
+        full_agent_system: dict,
+        mock_llm_responses: MagicMock,
+    ):
+        """Test listing reports."""
+        main_agent = full_agent_system["main_agent"]
+
+        mock_llm_responses.post.return_value.json.side_effect = [
+            {"content": [{"text": '{"tool": "report", "action": "list"}'}]},
+            {"content": [{"text": "Here are the available reports."}]},
+        ]
+
+        result = await main_agent.execute("List all reports")
+
+        assert result is not None
+
+
+class TestDatabaseEdgeCases:
+    """Test database edge cases in integration."""
+
+    async def test_database_error_recovery(
+        self,
+        integration_settings,
+        mocker,
+    ):
+        """Test that system continues when database has errors."""
+        from research_agents.agents.main_agent import MainAgent
+        from research_agents.core.orchestrator import Orchestrator
+        from research_agents.core.database import DatabaseService
+
+        orchestrator = Orchestrator(use_llm_selection=False)
+
+        # Create a database that fails on some operations
+        mock_db = MagicMock(spec=DatabaseService)
+        mock_db.connect = AsyncMock()
+        mock_db.initialize_schema = AsyncMock()
+        mock_db.create_session = AsyncMock()
+        mock_db.save_message = AsyncMock(side_effect=Exception("DB Error"))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "content": [{"text": "Hello! How can I help?"}]
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mocker.patch("httpx.AsyncClient", return_value=mock_client)
+
+        agent = MainAgent(orchestrator, integration_settings, database=mock_db)
+
+        # Should not raise despite DB error
+        response = await agent.chat("Hello")
+
+        assert "Hello" in response or len(response) > 0
+
+
+class TestMultiStepWorkflow:
+    """Test multi-step workflow scenarios."""
+
+    async def test_research_then_clear_cache(
+        self,
+        full_agent_system: dict,
+        mock_llm_responses: MagicMock,
+    ):
+        """Test research followed by cache clearing."""
+        main_agent = full_agent_system["main_agent"]
+
+        # Do research
+        mock_llm_responses.post.return_value.json.side_effect = [
+            {"content": [{"text": '{"tool": "research", "query": "test topic"}'}]},
+            {"content": [{"text": "Found some results!"}]},
+        ]
+
+        await main_agent.chat("Search for test topic")
+        assert len(main_agent.pending_validation) > 0
+
+        # Clear cache
+        main_agent.clear_research_cache()
+        assert len(main_agent.pending_validation) == 0
+        assert len(main_agent.research_cache) == 0
+
+    async def test_multiple_research_queries(
+        self,
+        full_agent_system: dict,
+        mock_llm_responses: MagicMock,
+    ):
+        """Test multiple research queries accumulate findings."""
+        main_agent = full_agent_system["main_agent"]
+
+        # First research
+        mock_llm_responses.post.return_value.json.side_effect = [
+            {"content": [{"text": '{"tool": "research", "query": "topic 1"}'}]},
+            {"content": [{"text": "Found results for topic 1"}]},
+            {"content": [{"text": '{"tool": "research", "query": "topic 2"}'}]},
+            {"content": [{"text": "Found results for topic 2"}]},
+        ]
+
+        await main_agent.chat("Search for topic 1")
+        count1 = len(main_agent.pending_validation)
+
+        await main_agent.chat("Search for topic 2")
+        count2 = len(main_agent.pending_validation)
+
+        # Should have accumulated findings
+        assert count2 >= count1
